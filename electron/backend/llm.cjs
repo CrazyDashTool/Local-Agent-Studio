@@ -3,6 +3,7 @@ const { endpoint, fetchJson } = require("./fetch.cjs");
 const { searchWeb } = require("./search.cjs");
 const { queueComfyPrompt } = require("./comfy.cjs");
 const { createDatabaseFromText } = require("./data.cjs");
+const { runCommand } = require("./sandbox.cjs");
 const {
   appendTextFile,
   deleteWorkspacePath,
@@ -25,6 +26,17 @@ const DATABASE_TRIGGER =
   /(\/db\b|\/database\b|\b(database|sqlite|db|dataset|table)\b|баз[ауые] данных|бд\b|sqlite|датасет|таблиц|базу|база|tabela|datenbank)/i;
 
 const TEXT_EXTENSIONS = "txt|md|json|csv|html|htm|css|js|jsx|ts|tsx|py|ps1|bat|cmd|log|xml|yaml|yml";
+const TOOL_ACTIONS = new Set([
+  "answer",
+  "write_file",
+  "read_file",
+  "append_file",
+  "delete_path",
+  "list_files",
+  "run_command",
+  "create_database",
+  "generate_image",
+]);
 
 function clamp(value, min, max) {
   const parsed = Number(value);
@@ -370,6 +382,111 @@ function fileListMarkdown(result) {
   return `Workspace root: \`${result.root}\`\n\n${rows}`;
 }
 
+function normalizeToolDecision(decision, settings) {
+  if (!decision || typeof decision !== "object") {
+    return { action: "answer" };
+  }
+
+  const action = String(decision.action || "answer").trim();
+  if (!TOOL_ACTIONS.has(action)) {
+    return { action: "answer" };
+  }
+
+  const maxImageJobs = clamp(settings.agent?.maxImageJobs || 3, 1, 3);
+  const allowedModels = new Set(["z-image-turbo", "flux2-klein-9b", "ideogram-v4"]);
+  const allowedEffort = new Set(["turbo", "default", "quality"]);
+
+  return {
+    action,
+    filePath: String(decision.filePath || "").replace(/^[/\\]+/, "").trim(),
+    content: decision.content == null ? "" : String(decision.content),
+    command: String(decision.command || "").trim(),
+    databaseName: String(decision.databaseName || "objects").trim(),
+    databaseText: decision.databaseText == null ? "" : String(decision.databaseText),
+    query: String(decision.query || "").trim(),
+    prompt: String(decision.prompt || "").trim(),
+    count: clamp(decision.count || settings.image?.repeat || 1, 1, maxImageJobs),
+    imageModel: allowedModels.has(decision.imageModel) ? decision.imageModel : settings.image?.model || "z-image-turbo",
+    ideogramEffort: allowedEffort.has(decision.ideogramEffort)
+      ? decision.ideogramEffort
+      : settings.image?.ideogramEffort || "default",
+    reason: String(decision.reason || "").trim(),
+  };
+}
+
+async function decideToolWithOllama({ messages, settings, headers, model }) {
+  const last = lastUser(messages);
+  const attachmentSummary = attachmentContext(last.attachments || []);
+  const recentMessages = compactMessages(messages, false)
+    .slice(-8)
+    .map((message) => `${message.role}: ${message.content}`)
+    .join("\n\n");
+
+  const payload = {
+    model,
+    messages: [
+      {
+        role: "system",
+        content: `You are the tool router for Local Agent Studio, a local-first desktop agent.
+Choose exactly one action for the app to execute, or "answer" if no tool is needed.
+
+Return only valid JSON with this schema:
+{
+  "action": "answer" | "write_file" | "read_file" | "append_file" | "delete_path" | "list_files" | "run_command" | "create_database" | "generate_image",
+  "filePath": "relative workspace path, when a file/path action is needed",
+  "content": "complete file content to write or append, when needed",
+  "command": "terminal command, when action is run_command",
+  "databaseName": "database name, when action is create_database",
+  "databaseText": "JSON/CSV/text source for database, when action is create_database",
+  "prompt": "final ComfyUI image prompt, when action is generate_image",
+  "count": 1,
+  "imageModel": "z-image-turbo" | "flux2-klein-9b" | "ideogram-v4",
+  "ideogramEffort": "turbo" | "default" | "quality",
+  "reason": "short reason"
+}
+
+Rules:
+- Act like a CLI-capable assistant. If the user asks to create, edit, append, read, list, delete, run, or generate, choose the matching tool.
+- If the user asks to create a file "on any topic" or without exact content, you must invent useful content and include the complete file text in "content".
+- Never choose write_file with empty content unless the user explicitly asks for an empty file.
+- File paths must be relative to the workspace. If the user gives no file name, choose a sensible one, e.g. "note.txt", "README.md", "todo.md", "data.json".
+- Use create_database for requests to build/import/convert objects into a local database.
+- Use generate_image only for a new visual asset. If the user attaches an image and asks what is on it, choose answer.
+- Use run_command only when the user asks to execute a shell/CLI command or a task that clearly requires CLI execution.
+- If the request is just conversation or analysis, choose answer.
+- Default imageModel is "${settings.image?.model || "z-image-turbo"}".
+- Default ideogramEffort is "${settings.image?.ideogramEffort || "default"}".
+- Max image count is ${clamp(settings.agent?.maxImageJobs || 3, 1, 3)}.`,
+      },
+      {
+        role: "user",
+        content: `Recent conversation:
+${recentMessages || "(none)"}
+
+Latest user message:
+${last.content || ""}
+
+Attachments:
+${attachmentSummary || "none"}`,
+      },
+    ],
+    stream: false,
+    options: {
+      temperature: 0,
+      num_ctx: Math.min(Number(settings.ollama.contextTokens ?? 8192), 8192),
+    },
+  };
+
+  const data = await fetchJson(endpoint(settings.ollama.baseUrl, "/api/chat"), {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+    timeoutMs: Math.min(Number(settings.ollama.timeoutMs || 120000), 45000),
+  });
+
+  return normalizeToolDecision(extractJsonObject(data?.message?.content || ""), settings);
+}
+
 function fileIntent(text) {
   if (!FILE_TRIGGER.test(text)) {
     return null;
@@ -470,6 +587,177 @@ async function maybeHandleFileIntent({ messages, settings, toolMode, onEvent }) 
       toolResults: [failed],
     };
   }
+}
+
+function terminalSummary(result) {
+  const body = [String(result.stdout || "").trim(), String(result.stderr || "").trim()].filter(Boolean).join("\n\n");
+  return `**Exit code:** ${result.exitCode}${result.timedOut ? " (timeout)" : ""}\n\n**Duration:** ${result.durationMs} ms${
+    body ? `\n\n\`\`\`text\n${body}\n\`\`\`` : ""
+  }`;
+}
+
+async function executeToolDecision({ decision, settings, onEvent }) {
+  if (!decision || decision.action === "answer") {
+    return null;
+  }
+
+  if (decision.action === "write_file" || decision.action === "append_file" || decision.action === "read_file" || decision.action === "delete_path" || decision.action === "list_files") {
+    const labels = {
+      append_file: "Append file",
+      delete_path: "Delete file",
+      list_files: "List workspace",
+      read_file: "Read file",
+      write_file: "Write file",
+    };
+    const running = {
+      type: "file",
+      label: labels[decision.action] || "Workspace file",
+      status: "running",
+      payload: decision,
+    };
+    onEvent?.({ type: "tool-start", toolResult: running });
+
+    try {
+      let result;
+      let content;
+      if (decision.action === "list_files") {
+        result = listFiles({ settings, directory: decision.filePath || "", depth: 2 });
+        content = fileListMarkdown(result);
+      } else if (decision.action === "read_file") {
+        result = readTextFile({ settings, filePath: decision.filePath });
+        content = `Read \`${result.relativePath}\`.\n\n\`\`\`${path.extname(result.relativePath).slice(1) || "text"}\n${result.content}\n\`\`\``;
+      } else if (decision.action === "append_file") {
+        result = appendTextFile({ settings, filePath: decision.filePath || "note.txt", content: decision.content || "" });
+        content = `Appended to \`${result.relativePath}\` in the workspace.\n\n\`\`\`text\n${decision.content || ""}\n\`\`\``;
+      } else if (decision.action === "delete_path") {
+        result = deleteWorkspacePath({ settings, filePath: decision.filePath });
+        content = `Deleted \`${result.relativePath}\` from the workspace.`;
+      } else {
+        result = writeTextFile({ settings, filePath: decision.filePath || "note.txt", content: decision.content || "", overwrite: true });
+        content = `Created \`${result.relativePath}\` in the workspace.\n\n\`\`\`${path.extname(result.relativePath).slice(1) || "text"}\n${result.content}\n\`\`\``;
+      }
+
+      const finished = {
+        ...running,
+        status: "done",
+        payload: result,
+      };
+      onEvent?.({ type: "tool-finish", toolResult: finished });
+      return {
+        content,
+        model: "workspace",
+        toolResults: [finished],
+      };
+    } catch (error) {
+      const failed = {
+        ...running,
+        status: "error",
+        payload: {
+          ...decision,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+      onEvent?.({ type: "tool-finish", toolResult: failed });
+      return {
+        content: `I could not complete the workspace file action: ${failed.payload.message}`,
+        model: "workspace",
+        toolResults: [failed],
+      };
+    }
+  }
+
+  if (decision.action === "run_command") {
+    const running = {
+      type: "terminal",
+      label: "Terminal run",
+      status: "running",
+      payload: decision,
+    };
+    onEvent?.({ type: "tool-start", toolResult: running });
+    try {
+      const result = await runCommand({ command: decision.command, settings });
+      const finished = {
+        ...running,
+        status: result.exitCode === 0 ? "done" : "error",
+        payload: result,
+      };
+      onEvent?.({ type: "tool-finish", toolResult: finished });
+      return {
+        content: terminalSummary(result),
+        model: "terminal",
+        toolResults: [finished],
+      };
+    } catch (error) {
+      const failed = {
+        ...running,
+        status: "error",
+        payload: {
+          ...decision,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+      onEvent?.({ type: "tool-finish", toolResult: failed });
+      return {
+        content: `I could not run the command: ${failed.payload.message}`,
+        model: "terminal",
+        toolResults: [failed],
+      };
+    }
+  }
+
+  if (decision.action === "create_database") {
+    const running = {
+      type: "database",
+      label: "Create local database",
+      status: "running",
+      payload: decision,
+    };
+    onEvent?.({ type: "tool-start", toolResult: running });
+    try {
+      const result = createDatabaseFromText({
+        settings,
+        name: decision.databaseName || "objects",
+        text: decision.databaseText || decision.content || "",
+      });
+      const finished = {
+        ...running,
+        status: "done",
+        payload: result,
+      };
+      onEvent?.({ type: "tool-finish", toolResult: finished });
+      const files = [
+        `- JSON database: \`${result.jsonRelativePath}\``,
+        result.csvRelativePath ? `- CSV export: \`${result.csvRelativePath}\`` : "",
+        result.sqliteRelativePath ? `- SQLite database: \`${result.sqliteRelativePath}\`` : "- SQLite database: unavailable in this runtime; JSON database was still created.",
+      ].filter(Boolean);
+      return {
+        content: `Created local database **${result.name}** with **${result.rows}** row${result.rows === 1 ? "" : "s"}.\n\n${files.join("\n")}`,
+        model: "database",
+        toolResults: [finished],
+      };
+    } catch (error) {
+      const failed = {
+        ...running,
+        status: "error",
+        payload: {
+          ...decision,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+      onEvent?.({ type: "tool-finish", toolResult: failed });
+      return {
+        content: `I could not create the database: ${failed.payload.message}`,
+        model: "database",
+        toolResults: [failed],
+      };
+    }
+  }
+
+  if (decision.action === "generate_image") {
+    return maybeRunImageGeneration({ parsed: decision, settings, onEvent });
+  }
+
+  return null;
 }
 
 function parseImageIntent(text, settings) {
@@ -711,6 +999,10 @@ async function maybeHandleImageIntent({ messages, settings, toolMode, headers, m
     return null;
   }
 
+  return maybeRunImageGeneration({ parsed, settings, onEvent });
+}
+
+async function maybeRunImageGeneration({ parsed, settings, onEvent }) {
   const running = {
     type: "comfy",
     label: `ComfyUI image (${parsed.imageModel})`,
@@ -954,11 +1246,6 @@ function thinkValue(settings) {
 }
 
 async function runAgentMessage({ messages, settings, toolMode, stream, onEvent }) {
-  const direct = await maybeHandleDirectTool({ messages, settings, toolMode, onEvent });
-  if (direct) {
-    return direct;
-  }
-
   const headers = { "Content-Type": "application/json" };
   if (settings.ollama.apiKey) {
     headers.Authorization = `Bearer ${settings.ollama.apiKey}`;
@@ -966,6 +1253,23 @@ async function runAgentMessage({ messages, settings, toolMode, stream, onEvent }
 
   onEvent?.({ type: "status", message: "Selecting Ollama model" });
   const model = await resolveModel(settings, headers);
+
+  if (toolMode !== "none") {
+    try {
+      onEvent?.({ type: "status", message: "Asking Ollama which tool to use" });
+      const decision = await decideToolWithOllama({ messages, settings, headers, model });
+      const routed = await executeToolDecision({ decision, settings, onEvent });
+      if (routed) {
+        return routed;
+      }
+    } catch {
+      const fallbackDirect = await maybeHandleDirectTool({ messages, settings, toolMode, onEvent });
+      if (fallbackDirect) {
+        return fallbackDirect;
+      }
+    }
+  }
+
   const imageTool = await maybeHandleImageIntent({ messages, settings, toolMode, headers, model, onEvent });
   if (imageTool) {
     return imageTool;
