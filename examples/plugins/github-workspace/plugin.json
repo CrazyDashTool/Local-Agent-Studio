@@ -1,0 +1,85 @@
+{
+  "id": "github-workspace",
+  "name": "GitHub Workspace",
+  "label": "GitHub Workspace",
+  "version": "0.1.0",
+  "author": "Local Agent Studio",
+  "publisher": "community",
+  "status": "draft",
+  "description": "Give the agent GitHub-aware repository, commit, issue, pull request, and release helpers.",
+  "homepage": "https://github.com/your-name/las-github-workspace",
+  "repository": "https://github.com/your-name/las-github-workspace",
+  "categories": ["github", "developer-tools", "workspace"],
+  "capabilities": ["agent_tool", "connector", "prompt_pack"],
+  "permissions": ["network", "files:read", "files:write", "terminal", "settings:read"],
+  "runtime": {
+    "type": "mcp",
+    "setup": "Uses a GitHub MCP server or GitHub CLI bridge. Write actions stay behind user confirmation."
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${settings.token}"
+      },
+      "enabled": false
+    }
+  ],
+  "tools": [
+    {
+      "name": "github_workspace.repo_summary",
+      "description": "Summarize repository status, remotes, branches, and latest changes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" }
+        }
+      }
+    },
+    {
+      "name": "github_workspace.prepare_commit",
+      "description": "Prepare a commit message and staged-file checklist without committing automatically.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "scope": { "type": "string" },
+          "messageStyle": { "type": "string", "default": "concise" }
+        }
+      }
+    },
+    {
+      "name": "github_workspace.copy_issue_context",
+      "description": "Fetch and format GitHub issue or pull request context for the agent.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": { "type": "string" }
+        },
+        "required": ["url"]
+      }
+    },
+    {
+      "name": "github_workspace.release_draft",
+      "description": "Create release notes from changelog, commits, and local assets.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "version": { "type": "string" },
+          "changelog": { "type": "string" }
+        },
+        "required": ["version"]
+      }
+    }
+  ],
+  "settingsSchema": {
+    "type": "object",
+    "properties": {
+      "token": { "type": "string", "title": "GitHub token" },
+      "defaultOwner": { "type": "string", "title": "Default owner" },
+      "defaultRepo": { "type": "string", "title": "Default repo" },
+      "allowPush": { "type": "boolean", "title": "Allow push actions", "default": false }
+    }
+  }
+}

@@ -40,7 +40,7 @@ function localVersionFromFile() {
       // Try the next path.
     }
   }
-  return "0.2.0";
+  return "0.2.1";
 }
 
 async function checkForUpdates(settings) {

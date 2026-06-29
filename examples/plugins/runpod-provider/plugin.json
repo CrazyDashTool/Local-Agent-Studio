@@ -1,0 +1,42 @@
+{
+  "id": "runpod-provider",
+  "name": "Runpod Provider",
+  "label": "Runpod Provider",
+  "version": "0.1.0",
+  "author": "Local Agent Studio",
+  "publisher": "community",
+  "status": "draft",
+  "description": "Add Runpod remote GPU provider presets for LLM and ComfyUI-style workloads.",
+  "homepage": "https://github.com/your-name/las-runpod-provider",
+  "repository": "https://github.com/your-name/las-runpod-provider",
+  "categories": ["provider", "gpu", "runpod"],
+  "capabilities": ["provider", "agent_tool"],
+  "permissions": ["network", "providers", "settings:read", "settings:write"],
+  "tools": [
+    {
+      "name": "runpod_provider.test_endpoint",
+      "description": "Test a Runpod endpoint and report health, latency, and supported routes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "endpointUrl": { "type": "string" },
+          "apiKey": { "type": "string" }
+        },
+        "required": ["endpointUrl"]
+      }
+    },
+    {
+      "name": "runpod_provider.create_preset",
+      "description": "Create a Local Agent Studio provider preset from a working Runpod endpoint.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "label": { "type": "string" },
+          "ollamaBaseUrl": { "type": "string" },
+          "comfyBaseUrl": { "type": "string" }
+        },
+        "required": ["label"]
+      }
+    }
+  ]
+}

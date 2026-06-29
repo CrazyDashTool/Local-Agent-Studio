@@ -1,8 +1,8 @@
-import { Bot, Clock3, FolderOpen, MessageSquare, Plus, RefreshCw, Settings as SettingsIcon, Terminal, UserRound } from "lucide-react";
+import { Bot, Clock3, FileText, FolderOpen, Image, MessageSquare, Plug, Plus, RefreshCw, Settings as SettingsIcon, Terminal, Wrench, UserRound } from "lucide-react";
 import { t } from "../i18n";
 import type { LanguageCode, Settings } from "../types";
 
-export type ActiveView = "chat" | "history" | "workspace" | "terminal";
+export type ActiveView = "chat" | "history" | "workspace" | "images" | "artifacts" | "tools" | "plugins" | "terminal";
 
 interface SidebarProps {
   activeView: ActiveView;
@@ -15,7 +15,7 @@ interface SidebarProps {
 
 export function Sidebar({ activeView, settings, onNavigate, onNewChat, onOpenSettings, onCheckUpdates }: SidebarProps) {
   const language = (settings?.appearance.language || "en") as LanguageCode;
-  const userName = "Anatoly";
+  const userName = settings?.profile?.userName || "User";
 
   return (
     <aside className="sidebar">
@@ -25,7 +25,7 @@ export function Sidebar({ activeView, settings, onNavigate, onNewChat, onOpenSet
         </div>
         <div className="brand-copy">
           <strong>Local Agent Studio</strong>
-          <span>v0.2.0</span>
+          <span>v0.2.1</span>
         </div>
         <button className="icon-button new-chat-button" type="button" onClick={onNewChat} aria-label={t(language, "newChat")}>
           <Plus size={19} />
@@ -44,6 +44,22 @@ export function Sidebar({ activeView, settings, onNavigate, onNewChat, onOpenSet
         <button className={activeView === "workspace" ? "nav-item active" : "nav-item"} type="button" onClick={() => onNavigate("workspace")}>
           <FolderOpen size={18} />
           {t(language, "workspace")}
+        </button>
+        <button className={activeView === "images" ? "nav-item active" : "nav-item"} type="button" onClick={() => onNavigate("images")}>
+          <Image size={18} />
+          Images
+        </button>
+        <button className={activeView === "artifacts" ? "nav-item active" : "nav-item"} type="button" onClick={() => onNavigate("artifacts")}>
+          <FileText size={18} />
+          Artifacts
+        </button>
+        <button className={activeView === "tools" ? "nav-item active" : "nav-item"} type="button" onClick={() => onNavigate("tools")}>
+          <Wrench size={18} />
+          Tools
+        </button>
+        <button className={activeView === "plugins" ? "nav-item active" : "nav-item"} type="button" onClick={() => onNavigate("plugins")}>
+          <Plug size={18} />
+          Plugins
         </button>
         <button className={activeView === "terminal" ? "nav-item active" : "nav-item"} type="button" onClick={() => onNavigate("terminal")}>
           <Terminal size={18} />

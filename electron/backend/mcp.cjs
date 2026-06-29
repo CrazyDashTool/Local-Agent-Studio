@@ -1,10 +1,13 @@
 const { spawn } = require("node:child_process");
+const { resolveSpawnCommand } = require("./commands.cjs");
+const { pluginMcpServers } = require("./pluginMarketplace.cjs");
 
 function enabledServers(settings) {
-  if (!settings.mcp?.enabled) {
-    return [];
-  }
-  return (settings.mcp.servers || []).filter((server) => server.enabled && server.name && server.command);
+  const manualServers = settings.mcp?.enabled
+    ? (settings.mcp.servers || []).filter((server) => server.enabled && server.name && server.command).map((server) => ({ ...server, source: "manual" }))
+    : [];
+  const pluginServers = settings._userDataDir ? pluginMcpServers(settings._userDataDir, settings) : [];
+  return [...manualServers, ...pluginServers];
 }
 
 function findServer(settings, serverName) {
@@ -29,13 +32,12 @@ function parseArgs(args) {
 }
 
 function createMcpSession(server, timeoutMs) {
-  const child = spawn(server.command, parseArgs(server.args), {
-    env: {
-      ...process.env,
-      ...(server.env || {}),
-    },
+  const resolved = resolveSpawnCommand(server.command, parseArgs(server.args), server.env || {});
+  const child = spawn(resolved.command, resolved.args, {
+    env: resolved.env,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
+    shell: resolved.shell,
   });
 
   let nextId = 1;
@@ -109,7 +111,7 @@ function createMcpSession(server, timeoutMs) {
       capabilities: {},
       clientInfo: {
         name: "Local Agent Studio",
-        version: "0.2.0",
+        version: "0.2.1",
       },
     });
     await notify("notifications/initialized");
@@ -123,8 +125,9 @@ function createMcpSession(server, timeoutMs) {
   return { initialize, request, close, stderr: () => stderr };
 }
 
-async function withMcpSession(settings, serverName, fn) {
+async function withMcpSession(settings, serverName, fn, toolName = "") {
   const server = findServer(settings, serverName);
+  await ensurePluginAuth(server, toolName);
   const session = createMcpSession(server, Number(settings.mcp?.timeoutMs || 15000));
   try {
     await session.initialize();
@@ -132,6 +135,81 @@ async function withMcpSession(settings, serverName, fn) {
   } finally {
     session.close();
   }
+}
+
+function runCommand(command, args = [], env = {}, timeoutMs = 30000) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let child;
+    try {
+      const resolved = resolveSpawnCommand(command, args, env);
+      child = spawn(resolved.command, resolved.args, {
+        env: resolved.env,
+        windowsHide: true,
+        shell: resolved.shell,
+      });
+    } catch (error) {
+      resolve({ exitCode: -1, stdout, stderr: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    const timeout = setTimeout(() => {
+      child.kill();
+      resolve({ exitCode: -1, stdout, stderr: `${stderr}\nTimed out after ${timeoutMs} ms`.trim() });
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      resolve({ exitCode: -1, stdout, stderr: error.message });
+    });
+    child.on("close", (exitCode) => {
+      clearTimeout(timeout);
+      resolve({ exitCode: exitCode ?? 0, stdout, stderr });
+    });
+  });
+}
+
+async function ensurePluginAuth(server, toolName = "") {
+  if (server.source !== "plugin" || !server.auth) {
+    return;
+  }
+  const requiredTools = Array.isArray(server.auth.requiredTools) ? server.auth.requiredTools.map(String) : [];
+  if (requiredTools.length && !requiredTools.includes(toolName)) {
+    return;
+  }
+  if (server.auth.type === "github_device_flow") {
+    if (server.env?.GITHUB_TOKEN) {
+      return;
+    }
+    const error = new Error(`${server.pluginLabel || server.name} requires GitHub sign-in before this tool can run.`);
+    error.code = "PLUGIN_AUTH_REQUIRED";
+    error.pluginId = server.pluginId;
+    error.pluginLabel = server.pluginLabel || server.name;
+    error.authLabel = server.auth.label || "Sign in";
+    error.stdout = "";
+    error.stderr = "GitHub token is not available.";
+    throw error;
+  }
+  if (!server.auth.checkCommand) {
+    return;
+  }
+  const result = await runCommand(server.auth.checkCommand, server.auth.checkArgs || [], server.env || {}, 30000);
+  if (result.exitCode === 0) {
+    return;
+  }
+  const error = new Error(`${server.pluginLabel || server.name} requires sign-in before this tool can run.`);
+  error.code = "PLUGIN_AUTH_REQUIRED";
+  error.pluginId = server.pluginId;
+  error.pluginLabel = server.pluginLabel || server.name;
+  error.authLabel = server.auth.label || "Sign in";
+  error.stdout = result.stdout;
+  error.stderr = result.stderr;
+  throw error;
 }
 
 async function listMcpTools({ settings }) {
@@ -174,7 +252,7 @@ async function callMcpTool({ settings, serverName, toolName, args = {} }) {
       toolName,
       result,
     };
-  });
+  }, toolName);
 }
 
 module.exports = {

@@ -1,0 +1,128 @@
+{
+  "version": 1,
+  "updatedAt": "2026-06-28",
+  "description": "Verified plugin catalog bundled with Local Agent Studio releases.",
+  "plugins": [
+    {
+      "id": "github-git-operator",
+      "name": "GitHub Git Operator",
+      "label": "GitHub Git Operator",
+      "version": "0.1.1",
+      "author": "Local Agent Studio",
+      "publisher": "official",
+      "status": "draft",
+      "description": "Browse GitHub repositories, clone repositories into the workspace, inspect git status, create local commits, and push branches.",
+      "homepage": "https://github.com/CrazyDashTool/LAS-github",
+      "repository": "https://github.com/CrazyDashTool/LAS-github",
+      "sourceUrl": "https://github.com/CrazyDashTool/LAS-github",
+      "manifestUrl": "https://raw.githubusercontent.com/CrazyDashTool/LAS-github/main/plugin.json",
+      "bannerUrl": "https://raw.githubusercontent.com/CrazyDashTool/LAS-github/main/assets/github-git-operator-header.png",
+      "verifiedAt": "2026-06-28",
+      "categories": ["github", "git", "developer-tools"],
+      "capabilities": ["agent_tool", "connector", "mcp"],
+      "permissions": ["network", "files:read", "files:write", "terminal"],
+      "runtime": {
+        "type": "mcp",
+        "setup": "Requires Git and Node.js/npm. Click Sign in to use GitHub Device Flow; Local Agent Studio stores the token locally and passes it to the plugin as GITHUB_TOKEN."
+      },
+      "auth": {
+        "type": "github_device_flow",
+        "label": "Sign in with GitHub",
+        "provider": "github",
+        "clientId": "Iv23liAr6CVnNA2oFUgE",
+        "requiredTools": ["github_list_repos", "git_push"]
+      },
+      "mcpServers": [
+        {
+          "name": "github-git-operator",
+          "command": "npx",
+          "args": ["-y", "github:CrazyDashTool/LAS-github"],
+          "env": {
+            "GITHUB_TOKEN": "",
+            "LAS_WORKSPACE": "${workspacePath}"
+          },
+          "enabled": false
+        }
+      ],
+      "tools": [
+        {
+          "name": "github_list_repos",
+          "description": "List GitHub repositories for the authenticated user or a public owner.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "owner": { "type": "string", "description": "Optional public GitHub user/org. If omitted, uses the authenticated user." },
+              "limit": { "type": "number", "default": 20 }
+            }
+          }
+        },
+        {
+          "name": "git_clone",
+          "description": "Clone a Git repository into the configured workspace.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "repoUrl": { "type": "string", "description": "Repository URL or owner/name, for example https://github.com/CrazyDashTool/LAS-github or CrazyDashTool/LAS-github." },
+              "repository": { "type": "string", "description": "Alias for repoUrl." },
+              "repo": { "type": "string", "description": "Alias for repoUrl." },
+              "url": { "type": "string", "description": "Alias for repoUrl." },
+              "directory": { "type": "string", "description": "Optional folder name inside workspace." }
+            }
+          }
+        },
+        {
+          "name": "git_status",
+          "description": "Show branch and short git status for a local repository.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "repoPath": { "type": "string" }
+            }
+          }
+        },
+        {
+          "name": "git_commit",
+          "description": "Create a local git commit. This does not push unless git_push is called separately.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "repoPath": { "type": "string" },
+              "message": { "type": "string" },
+              "addAll": { "type": "boolean", "default": false },
+              "paths": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            },
+            "required": ["message"]
+          }
+        },
+        {
+          "name": "git_push",
+          "description": "Push the current branch to a remote. Requires GitHub sign-in or existing git credentials.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "repoPath": { "type": "string" },
+              "remote": { "type": "string", "default": "origin" },
+              "branch": { "type": "string" },
+              "setUpstream": { "type": "boolean", "default": false },
+              "forceWithLease": { "type": "boolean", "default": false }
+            }
+          }
+        },
+        {
+          "name": "git_log",
+          "description": "Show recent commits for a local repository.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "repoPath": { "type": "string" },
+              "limit": { "type": "number", "default": 8 }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { ChatWorkspace } from "./components/ChatWorkspace";
+import { ArtifactsPanel } from "./components/ArtifactsPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
+import { ImageGalleryPanel } from "./components/ImageGalleryPanel";
+import { PluginsPanel } from "./components/PluginsPanel";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { ActiveView, Sidebar } from "./components/Sidebar";
 import { SetupWizard } from "./components/SetupWizard";
 import { TerminalPanel } from "./components/TerminalPanel";
+import { ToolsPanel } from "./components/ToolsPanel";
 import { WorkspacePanel } from "./components/WorkspacePanel";
 import type {
   AgentStreamEvent,
@@ -66,6 +70,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [toolMode, setToolMode] = useState<ToolMode>("auto");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [queuedTasks, setQueuedTasks] = useState<QueuedTask[]>([]);
 
@@ -108,6 +113,11 @@ export function App() {
     const saved = await window.localAgent.saveSettings(nextSettings);
     setSettings(saved);
     setSettingsOpen(false);
+  }, []);
+
+  const refreshSettings = useCallback(async () => {
+    const latest = await window.localAgent.getSettings();
+    setSettings(latest);
   }, []);
 
   const saveSettingsPatch = useCallback((patcher: (settings: Settings) => Settings) => {
@@ -208,18 +218,20 @@ export function App() {
     setActiveView("chat");
   }, []);
 
-  const handleFinishSetup = useCallback(async () => {
-    if (!settings) {
+  const handleFinishSetup = useCallback(async (nextSettings?: Settings) => {
+    const base = nextSettings || settings;
+    if (!base) {
       return;
     }
     const saved = await window.localAgent.saveSettings({
-      ...settings,
+      ...base,
       setup: {
-        ...settings.setup,
+        ...base.setup,
         firstLaunchComplete: true,
       },
     });
     setSettings(saved);
+    setSetupOpen(false);
   }, [settings]);
 
   const handleExportChat = useCallback(async () => {
@@ -406,11 +418,10 @@ export function App() {
 
   return (
     <div className="app-shell">
-      {settings && !settings.setup?.firstLaunchComplete ? (
+      {settings && (setupOpen || !settings.setup?.firstLaunchComplete) ? (
         <SetupWizard
           settings={settings}
           onChooseWorkspace={handleChooseWorkspace}
-          onContextDateToggle={handleContextDateToggle}
           onFinish={handleFinishSetup}
         />
       ) : null}
@@ -456,6 +467,16 @@ export function App() {
 
         {activeView === "workspace" ? <WorkspacePanel settings={settings} onChooseWorkspace={handleChooseWorkspace} /> : null}
 
+        {activeView === "images" ? <ImageGalleryPanel settings={settings} /> : null}
+
+        {activeView === "artifacts" ? <ArtifactsPanel settings={settings} /> : null}
+
+        {activeView === "tools" ? (
+          <ToolsPanel settings={settings} onSaveSettings={handleSaveSettings} onOpenSettings={() => setSettingsOpen(true)} />
+        ) : null}
+
+        {activeView === "plugins" ? <PluginsPanel onSettingsChanged={refreshSettings} /> : null}
+
         {activeView === "terminal" ? <TerminalPanel settings={settings} onRun={runTerminal} /> : null}
       </main>
 
@@ -465,6 +486,10 @@ export function App() {
           onCancel={() => setSettingsOpen(false)}
           onSave={handleSaveSettings}
           onChooseWorkspace={handleChooseWorkspace}
+          onRunSetupWizard={() => {
+            setSettingsOpen(false);
+            setSetupOpen(true);
+          }}
         />
       ) : null}
     </div>

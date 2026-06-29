@@ -1,26 +1,33 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FolderOpen, RefreshCw, Save, X } from "lucide-react";
 import { languageLabels } from "../i18n";
-import type { IdeogramEffort, ImageModel, LanguageCode, McpServerConfig, SearchProvider, Settings, ThemeMode, ThinkingMode, ToolPermission } from "../types";
+import type { AgentPermissionProfile, IdeogramEffort, ImageModel, LanguageCode, McpServerConfig, SearchProvider, Settings, ThemeMode, ThinkingMode, ToolPermission } from "../types";
 
 interface SettingsDrawerProps {
   settings: Settings;
   onCancel: () => void;
   onSave: (settings: Settings) => Promise<void>;
   onChooseWorkspace: () => void;
+  onRunSetupWizard: () => void;
 }
 
 function cloneSettings(settings: Settings): Settings {
   return JSON.parse(JSON.stringify(settings)) as Settings;
 }
 
-export function SettingsDrawer({ settings, onCancel, onSave, onChooseWorkspace }: SettingsDrawerProps) {
+export function SettingsDrawer({ settings, onCancel, onSave, onChooseWorkspace, onRunSetupWizard }: SettingsDrawerProps) {
   const [draft, setDraft] = useState<Settings>(() => cloneSettings(settings));
   const [customModelsText, setCustomModelsText] = useState(() => JSON.stringify(settings.image.customModels || [], null, 2));
   const [mcpServersText, setMcpServersText] = useState(() => JSON.stringify(settings.mcp?.servers || [], null, 2));
   const [jsonError, setJsonError] = useState("");
   const [updateStatus, setUpdateStatus] = useState("");
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setDraft(cloneSettings(settings));
+    setCustomModelsText(JSON.stringify(settings.image.customModels || [], null, 2));
+    setMcpServersText(JSON.stringify(settings.mcp?.servers || [], null, 2));
+  }, [settings]);
 
   function patch<T extends keyof Settings>(section: T, value: Partial<Settings[T]>) {
     setDraft((current) => ({
@@ -86,6 +93,10 @@ export function SettingsDrawer({ settings, onCancel, onSave, onChooseWorkspace }
           <section>
             <h3>Appearance</h3>
             <label>
+              Your name
+              <input value={draft.profile?.userName || ""} onChange={(event) => patch("profile", { userName: event.target.value })} />
+            </label>
+            <label>
               Theme
               <select value={draft.appearance.theme} onChange={(event) => patch("appearance", { theme: event.target.value as ThemeMode })}>
                 <option value="system">system</option>
@@ -117,6 +128,11 @@ export function SettingsDrawer({ settings, onCancel, onSave, onChooseWorkspace }
                 </button>
               </div>
             </label>
+            <button className="quiet-button icon-text" type="button" onClick={onRunSetupWizard}>
+              <RefreshCw size={15} />
+              Run setup wizard again
+            </button>
+            <p className="settings-note">Open the first-launch setup screen again without deleting your saved settings.</p>
           </section>
 
           <section>
@@ -135,6 +151,15 @@ export function SettingsDrawer({ settings, onCancel, onSave, onChooseWorkspace }
           <section>
             <h3>Agent Limits</h3>
             <div className="two-col">
+              <label>
+                Permission profile
+                <select value={draft.agent.permissionProfile || "balanced"} onChange={(event) => patch("agent", { permissionProfile: event.target.value as AgentPermissionProfile })}>
+                  <option value="read-only">read-only</option>
+                  <option value="balanced">balanced</option>
+                  <option value="builder">builder</option>
+                  <option value="full">full</option>
+                </select>
+              </label>
               <label>
                 Web searches
                 <input
@@ -177,6 +202,94 @@ export function SettingsDrawer({ settings, onCancel, onSave, onChooseWorkspace }
           </section>
 
           <section>
+            <h3>Controlled Execution</h3>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={draft.controlledExecution?.dryRun ?? false}
+                onChange={(event) => patch("controlledExecution", { dryRun: event.target.checked })}
+              />
+              Dry-run mode
+            </label>
+            <p className="settings-note">Show exact planned tool/file/API actions without executing them.</p>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={draft.controlledExecution?.executionLog ?? true}
+                onChange={(event) => patch("controlledExecution", { executionLog: event.target.checked })}
+              />
+              Execution log
+            </label>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={draft.controlledExecution?.sandboxPerTask ?? false}
+                onChange={(event) => patch("controlledExecution", { sandboxPerTask: event.target.checked })}
+              />
+              Sandbox each task in <code>.las-tasks</code>
+            </label>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={draft.controlledExecution?.evaluatorPass ?? false}
+                onChange={(event) => patch("controlledExecution", { evaluatorPass: event.target.checked })}
+              />
+              Evaluator pass
+            </label>
+            <h4>Approval gates</h4>
+            <div className="two-col">
+              {(["destructive", "terminal", "externalWrite", "credentialUse", "installs"] as const).map((key) => (
+                <label className="checkbox-label" key={key}>
+                  <input
+                    type="checkbox"
+                    checked={draft.controlledExecution?.approvalGates?.[key] ?? true}
+                    onChange={(event) =>
+                      patch("controlledExecution", {
+                        approvalGates: {
+                          ...draft.controlledExecution.approvalGates,
+                          [key]: event.target.checked,
+                        },
+                      })
+                    }
+                  />
+                  {key}
+                </label>
+              ))}
+            </div>
+          </section>
+
+          <section>
+            <h3>Personal Memory</h3>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={draft.memory?.enabled ?? false}
+                onChange={(event) => patch("memory", { enabled: event.target.checked })}
+              />
+              Enable memory between chats
+            </label>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={draft.memory?.autoRemember ?? false}
+                onChange={(event) => patch("memory", { autoRemember: event.target.checked })}
+              />
+              Let the agent suggest memory saves
+            </label>
+            <label>
+              Max memory entries
+              <input
+                type="number"
+                min="1"
+                max="500"
+                value={draft.memory?.maxEntries ?? 80}
+                onChange={(event) => patch("memory", { maxEntries: Number(event.target.value) })}
+              />
+            </label>
+            <p className="settings-note">Memory is stored in the app data folder and can be managed from Tools.</p>
+          </section>
+
+          <section>
             <h3>Tool Permissions</h3>
             <div className="two-col">
               {(Object.keys(draft.permissions) as Array<keyof Settings["permissions"]>).map((key) => (
@@ -195,7 +308,7 @@ export function SettingsDrawer({ settings, onCancel, onSave, onChooseWorkspace }
           </section>
 
           <section>
-            <h3>Ollama LLM</h3>
+            <h3>LLM provider</h3>
             <label>
               Base URL
               <input value={draft.ollama.baseUrl} onChange={(event) => patch("ollama", { baseUrl: event.target.value })} />

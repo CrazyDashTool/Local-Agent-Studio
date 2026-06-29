@@ -12,6 +12,8 @@ import {
   FolderOpen,
   Globe2,
   Image,
+  KeyRound,
+  Mic,
   Paperclip,
   Pencil,
   Plug,
@@ -19,6 +21,7 @@ import {
   Send,
   Settings as SettingsIcon,
   Terminal,
+  Type,
   User,
   X,
 } from "lucide-react";
@@ -136,6 +139,12 @@ function iconForTool(tool: ToolResult) {
   if (tool.type === "mcp") {
     return <Plug size={13} />;
   }
+  if (tool.type === "memory") {
+    return <Brain size={13} />;
+  }
+  if (tool.type === "artifact") {
+    return <FileText size={13} />;
+  }
   return <FileText size={13} />;
 }
 
@@ -205,6 +214,7 @@ function ToolResultDetails({ tool, language }: { tool: ToolResult; language: Set
   const [loadedImages, setLoadedImages] = useState<Record<string, ComfyImage[]>>({});
   const [savedImages, setSavedImages] = useState<Record<string, string>>({});
   const [imageStatus, setImageStatus] = useState<Record<string, string>>({});
+  const [authStatus, setAuthStatus] = useState("");
 
   async function loadComfyImages(promptId: string) {
     setImageStatus((current) => ({ ...current, [promptId]: "Loading..." }));
@@ -323,6 +333,42 @@ function ToolResultDetails({ tool, language }: { tool: ToolResult; language: Set
     );
   }
 
+  if (tool.type === "artifact" || tool.type === "memory" || tool.type === "mcp") {
+    const payload = tool.payload || {};
+    async function signInPlugin() {
+      if (!payload.pluginId) {
+        return;
+      }
+      setAuthStatus(`Starting ${payload.authLabel || "Sign in"}...`);
+      try {
+        const result = await window.localAgent.runPluginAuth({ pluginId: payload.pluginId });
+        const detail = result.check?.stdout || result.check?.stderr || result.result.stdout || result.result.stderr;
+        setAuthStatus(result.ok ? `Signed in. Try your request again. ${detail}` : `Sign-in did not complete. ${detail}`);
+      } catch (error) {
+        setAuthStatus(error instanceof Error ? error.message : String(error));
+      }
+    }
+    return (
+      <details className="tool-details" open={tool.status === "error"}>
+        <summary>{tool.label}</summary>
+        <div className="file-result-list">
+          {payload.artifact?.relativePath ? <code>Artifacts/{payload.artifact.relativePath}</code> : null}
+          {payload.relativePath ? <code>{payload.relativePath}</code> : null}
+          {payload.content ? <span>{payload.content}</span> : null}
+          {payload.message ? <span>{payload.message}</span> : null}
+          {payload.authRequired ? (
+            <button className="tiny-button" type="button" onClick={signInPlugin}>
+              <KeyRound size={13} />
+              {payload.authLabel || "Sign in"}
+            </button>
+          ) : null}
+          {authStatus ? <small>{authStatus}</small> : null}
+          {tool.type === "mcp" ? <code>{JSON.stringify(payload.result ?? payload, null, 2).slice(0, 1200)}</code> : null}
+        </div>
+      </details>
+    );
+  }
+
   return null;
 }
 
@@ -362,6 +408,47 @@ function ReasoningPanel({ thinking, language }: { thinking?: string; language: S
       </summary>
       <pre>{thinking}</pre>
     </details>
+  );
+}
+
+function modelCapabilities(settings: Settings | null) {
+  const model = settings?.ollama.model || "auto";
+  const lower = model.toLowerCase();
+  const hasVision = lower.includes("gemma") || lower.includes("llava") || lower.includes("vision") || lower.includes("qwen2.5vl");
+  const hasAudio = lower.includes("gemma4:e2b") || lower.includes("gemma4:e4b") || lower.includes("audio");
+  return [
+    { label: "Text", icon: <Type size={12} /> },
+    ...(hasVision ? [{ label: "Image", icon: <Image size={12} /> }] : []),
+    ...(hasAudio ? [{ label: "Audio", icon: <Mic size={12} /> }] : []),
+    ...(settings?.mcp?.enabled ? [{ label: "MCP", icon: <Plug size={12} /> }] : []),
+  ];
+}
+
+function ActivityTimeline({ messages }: { messages: ChatMessage[] }) {
+  const events = messages
+    .flatMap((message) =>
+      (message.toolResults || []).map((tool) => ({
+        id: `${message.id}-${tool.label}-${tool.query || ""}`,
+        label: tool.label,
+        status: tool.status || "done",
+        type: tool.type,
+      })),
+    )
+    .slice(-6);
+
+  if (!events.length) {
+    return null;
+  }
+
+  return (
+    <div className="activity-timeline" aria-label="Tool activity timeline">
+      {events.map((event) => (
+        <span className={`activity-step ${event.status}`} key={event.id}>
+          {iconForTool({ type: event.type, label: event.label })}
+          {event.label}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -483,6 +570,7 @@ export function ChatWorkspace({
 
   const imageSettings = settings?.image;
   const workspaceLabel = settings?.workspacePath ? settings.workspacePath.split(/[\\/]/).pop() || settings.workspacePath : t(language, "noDirectory");
+  const capabilities = modelCapabilities(settings);
 
   return (
     <section
@@ -548,6 +636,14 @@ export function ChatWorkspace({
               />
             ) : null}
           </div>
+          <div className="capability-row">
+            {capabilities.map((capability) => (
+              <span className="capability-badge" key={capability.label}>
+                {capability.icon}
+                {capability.label}
+              </span>
+            ))}
+          </div>
         </div>
 
         <div className="chat-header-actions">
@@ -567,6 +663,7 @@ export function ChatWorkspace({
           </button>
         </div>
       </header>
+      <ActivityTimeline messages={messages} />
 
       <div className="message-list">
         <div className="message-column">

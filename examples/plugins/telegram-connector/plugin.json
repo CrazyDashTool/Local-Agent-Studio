@@ -1,0 +1,82 @@
+{
+  "id": "telegram-connector",
+  "name": "Telegram Connector",
+  "label": "Telegram Connector",
+  "version": "0.1.0",
+  "author": "Local Agent Studio",
+  "publisher": "community",
+  "status": "draft",
+  "description": "Connect Telegram chats so the agent can search messages, draft replies, and prepare summaries.",
+  "homepage": "https://github.com/your-name/las-telegram-connector",
+  "repository": "https://github.com/your-name/las-telegram-connector",
+  "categories": ["messenger", "telegram", "productivity"],
+  "capabilities": ["agent_tool", "connector", "prompt_pack"],
+  "permissions": ["network", "messages:read", "messages:write", "settings:read"],
+  "runtime": {
+    "type": "mcp",
+    "setup": "Install a Telegram MCP server and add Telegram API credentials in plugin settings."
+  },
+  "mcpServers": [
+    {
+      "name": "telegram",
+      "command": "npx",
+      "args": ["-y", "telegram-mcp-server"],
+      "env": {
+        "TELEGRAM_API_ID": "${settings.apiId}",
+        "TELEGRAM_API_HASH": "${settings.apiHash}",
+        "TELEGRAM_SESSION": "${settings.sessionName}"
+      },
+      "enabled": false
+    }
+  ],
+  "tools": [
+    {
+      "name": "telegram.search_messages",
+      "description": "Search Telegram chats by query, sender, chat, or date range.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string" },
+          "chat": { "type": "string" },
+          "limit": { "type": "number", "default": 20 }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "telegram.draft_reply",
+      "description": "Draft a Telegram reply without sending it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "chat": { "type": "string" },
+          "message": { "type": "string" },
+          "tone": { "type": "string", "default": "friendly" }
+        },
+        "required": ["chat", "message"]
+      }
+    },
+    {
+      "name": "telegram.summarize_chat",
+      "description": "Summarize recent Telegram messages from a selected chat.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "chat": { "type": "string" },
+          "since": { "type": "string" }
+        },
+        "required": ["chat"]
+      }
+    }
+  ],
+  "settingsSchema": {
+    "type": "object",
+    "properties": {
+      "apiId": { "type": "string", "title": "Telegram API ID" },
+      "apiHash": { "type": "string", "title": "Telegram API Hash" },
+      "sessionName": { "type": "string", "title": "Session name", "default": "local-agent-studio" },
+      "allowSend": { "type": "boolean", "title": "Allow direct sending", "default": false }
+    },
+    "required": ["apiId", "apiHash"]
+  }
+}

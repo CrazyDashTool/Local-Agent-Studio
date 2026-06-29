@@ -1,15 +1,24 @@
 const path = require("node:path");
 const fs = require("node:fs");
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { spawn } = require("node:child_process");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require("electron");
 const { readSettings, saveSettings } = require("./backend/config.cjs");
 const { checkProviders } = require("./backend/providers.cjs");
 const { sendAgentMessage, sendAgentMessageStream } = require("./backend/llm.cjs");
 const { searchWeb } = require("./backend/search.cjs");
 const { queueComfyPrompt, getComfyHistory, getComfyImages, saveComfyImageToWorkspace } = require("./backend/comfy.cjs");
+const { appendArtifact, listArtifacts, readArtifact, writeArtifact } = require("./backend/artifacts.cjs");
+const { addImageHistoryJob, readImageHistory, updateImageHistoryImages } = require("./backend/imageHistory.cjs");
+const { addMemory, clearMemory, deleteMemory, readMemory } = require("./backend/memory.cjs");
 const { listMcpTools, callMcpTool } = require("./backend/mcp.cjs");
+const { installPluginFromUrl, listPlugins, setPluginEnabled, setPluginInstalled } = require("./backend/pluginMarketplace.cjs");
 const { checkForUpdates } = require("./backend/updates.cjs");
 const { runCommand } = require("./backend/sandbox.cjs");
+const { resolveSpawnCommand } = require("./backend/commands.cjs");
+const { readExecutionLog } = require("./backend/executionLog.cjs");
+const { runGitHubDeviceAuth } = require("./backend/githubDeviceAuth.cjs");
 const { describeAttachments } = require("./backend/attachments.cjs");
+const { applyProjectTemplate, listProjectTemplates } = require("./backend/templates.cjs");
 const {
   appendTextFile,
   deleteWorkspacePath,
@@ -29,6 +38,161 @@ function userDataDir() {
 
 function getSettings() {
   return readSettings(userDataDir());
+}
+
+function getRuntimeSettings() {
+  return {
+    ...getSettings(),
+    _userDataDir: userDataDir(),
+  };
+}
+
+function hydratePluginEnv(env, settings) {
+  const next = {};
+  for (const [key, value] of Object.entries(env || {})) {
+    next[key] = String(value || "")
+      .replaceAll("${workspacePath}", settings.workspacePath || "")
+      .replaceAll("${settings.workspacePath}", settings.workspacePath || "");
+  }
+  return next;
+}
+
+function syncPluginMcpServers(pluginsResult) {
+  const plugins = Array.isArray(pluginsResult?.plugins) ? pluginsResult.plugins : [];
+  const settings = getSettings();
+  const pluginServerNames = new Set(plugins.flatMap((plugin) => (plugin.mcpServers || []).map((server) => server.name).filter(Boolean)));
+  const existingServers = Array.isArray(settings.mcp?.servers) ? settings.mcp.servers : [];
+  const nextServers = existingServers.filter((server) => !pluginServerNames.has(server.name));
+  if (nextServers.length !== existingServers.length) {
+    saveSettings(userDataDir(), {
+      ...settings,
+      mcp: {
+        ...settings.mcp,
+        servers: nextServers,
+      },
+    });
+  }
+  return pluginsResult;
+}
+
+function runPluginCommand(command, args = [], env = {}, timeoutMs = 300000) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let child;
+    try {
+      const resolved = resolveSpawnCommand(command, args, env);
+      child = spawn(resolved.command, resolved.args, {
+        env: resolved.env,
+        windowsHide: true,
+        shell: resolved.shell,
+      });
+    } catch (error) {
+      resolve({ exitCode: -1, stdout, stderr: error instanceof Error ? error.message : String(error), timedOut: false });
+      return;
+    }
+    const timeout = setTimeout(() => {
+      child.kill();
+      resolve({ exitCode: -1, stdout, stderr: `${stderr}\nTimed out after ${timeoutMs} ms`.trim(), timedOut: true });
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      resolve({ exitCode: -1, stdout, stderr: error.message, timedOut: false });
+    });
+    child.on("close", (exitCode) => {
+      clearTimeout(timeout);
+      resolve({ exitCode: exitCode ?? 0, stdout, stderr, timedOut: false });
+    });
+  });
+}
+
+function isMissingCommandResult(result, command) {
+  const text = `${result?.stdout || ""}\n${result?.stderr || ""}`;
+  return result?.exitCode !== 0 && new RegExp(`Required command "${String(command).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}" was not found`, "i").test(text);
+}
+
+function authAutoInstallCommand(auth) {
+  if (process.platform === "win32") {
+    return auth.autoInstall?.windows || null;
+  }
+  return null;
+}
+
+async function runPluginAuth(pluginId) {
+  const plugin = listPlugins(userDataDir()).plugins.find((item) => item.id === pluginId);
+  if (!plugin?.auth) {
+    throw new Error("This plugin does not define browser sign-in.");
+  }
+  if (plugin.auth.type === "github_device_flow") {
+    return runGitHubDeviceAuth({
+      userDataDir: userDataDir(),
+      plugin,
+      openDeviceCode: async (device) => {
+        clipboard.writeText(device.userCode);
+        await shell.openExternal(device.verificationUriComplete || device.verificationUri);
+        if (!device.verificationUriComplete) {
+          await dialog.showMessageBox(mainWindow, {
+            type: "info",
+            title: "GitHub sign in",
+            message: "Complete GitHub sign in in your browser",
+            detail: `Enter this code on GitHub:\n\n${device.userCode}\n\nThe code was copied to your clipboard.`,
+            buttons: ["OK"],
+          });
+        }
+      },
+    });
+  }
+  if (plugin.auth.type !== "browser_command") {
+    throw new Error("This plugin does not define a supported sign-in method.");
+  }
+  const settings = getSettings();
+  const authEnv = hydratePluginEnv(plugin.auth.env || {}, settings);
+
+  let initialCheck = null;
+  if (plugin.auth.checkCommand) {
+    initialCheck = await runPluginCommand(plugin.auth.checkCommand, plugin.auth.checkArgs || [], authEnv, 30000);
+    if (initialCheck.exitCode === 0) {
+      return {
+        pluginId,
+        label: plugin.auth.label || "Sign in",
+        ok: true,
+        result: { exitCode: 0, stdout: "Already signed in.", stderr: "", timedOut: false },
+        check: initialCheck,
+        install: null,
+      };
+    }
+  }
+
+  let install = null;
+  let result = await runPluginCommand(plugin.auth.command, plugin.auth.args || [], authEnv);
+  if (isMissingCommandResult(result, plugin.auth.command)) {
+    const installer = authAutoInstallCommand(plugin.auth);
+    if (installer?.command) {
+      install = await runPluginCommand(installer.command, installer.args || [], authEnv, 600000);
+      if (install.exitCode === 0) {
+        result = await runPluginCommand(plugin.auth.command, plugin.auth.args || [], authEnv);
+      }
+    }
+  }
+
+  let check = null;
+  if (plugin.auth.checkCommand) {
+    check = await runPluginCommand(plugin.auth.checkCommand, plugin.auth.checkArgs || [], authEnv, 30000);
+  }
+  return {
+    pluginId,
+    label: plugin.auth.label || "Sign in",
+    result,
+    check,
+    install,
+    ok: result.exitCode === 0 && (!check || check.exitCode === 0),
+  };
 }
 
 async function createWindow() {
@@ -68,7 +232,7 @@ function registerHandlers() {
     sendAgentMessage({
       messages: payload.messages,
       toolMode: payload.toolMode,
-      settings: getSettings(),
+      settings: getRuntimeSettings(),
     }),
   );
 
@@ -76,7 +240,7 @@ function registerHandlers() {
     sendAgentMessageStream({
       messages: payload.messages,
       toolMode: payload.toolMode,
-      settings: getSettings(),
+      settings: getRuntimeSettings(),
       onEvent: (streamEvent) => {
         event.sender.send("agent:stream:event", {
           requestId: payload.requestId,
@@ -94,16 +258,29 @@ function registerHandlers() {
     }),
   );
 
-  ipcMain.handle("comfy:queue", async (_event, payload) =>
-    queueComfyPrompt({
+  ipcMain.handle("comfy:queue", async (_event, payload) => {
+    const settings = getRuntimeSettings();
+    const result = await queueComfyPrompt({
       prompt: payload.prompt,
       negativePrompt: payload.negativePrompt,
       imageModel: payload.imageModel,
       ideogramEffort: payload.ideogramEffort,
       count: payload.count,
-      settings: getSettings(),
-    }),
-  );
+      settings,
+    });
+    addImageHistoryJob(
+      userDataDir(),
+      {
+        prompt: payload.prompt,
+        negativePrompt: payload.negativePrompt,
+        imageModel: payload.imageModel,
+        ideogramEffort: payload.ideogramEffort,
+        count: payload.count,
+      },
+      result,
+    );
+    return result;
+  });
 
   ipcMain.handle("comfy:history", async (_event, payload) =>
     getComfyHistory({
@@ -112,12 +289,16 @@ function registerHandlers() {
     }),
   );
 
-  ipcMain.handle("comfy:images", async (_event, payload) =>
-    getComfyImages({
+  ipcMain.handle("comfy:images", async (_event, payload) => {
+    const result = await getComfyImages({
       promptId: payload.promptId,
       settings: getSettings(),
-    }),
-  );
+    });
+    updateImageHistoryImages(userDataDir(), payload.promptId, result.images || []);
+    return result;
+  });
+
+  ipcMain.handle("images:history", async () => readImageHistory(userDataDir()));
 
   ipcMain.handle("comfy:save-image", async (_event, payload) =>
     saveComfyImageToWorkspace({
@@ -128,18 +309,51 @@ function registerHandlers() {
 
   ipcMain.handle("mcp:list-tools", async () =>
     listMcpTools({
-      settings: getSettings(),
+      settings: getRuntimeSettings(),
     }),
   );
 
   ipcMain.handle("mcp:call-tool", async (_event, payload) =>
     callMcpTool({
-      settings: getSettings(),
+      settings: getRuntimeSettings(),
       serverName: payload.serverName,
       toolName: payload.toolName,
       args: payload.args || {},
     }),
   );
+
+  ipcMain.handle("memory:list", async () => readMemory(userDataDir()));
+  ipcMain.handle("memory:add", async (_event, payload) => addMemory(userDataDir(), payload.content, payload.source || "manual", getSettings().memory?.maxEntries));
+  ipcMain.handle("memory:delete", async (_event, payload) => deleteMemory(userDataDir(), payload.id));
+  ipcMain.handle("memory:clear", async () => clearMemory(userDataDir()));
+
+  ipcMain.handle("artifacts:list", async () => listArtifacts({ settings: getSettings() }));
+  ipcMain.handle("artifacts:read", async (_event, payload) => readArtifact({ settings: getSettings(), id: payload.id }));
+  ipcMain.handle("artifacts:write", async (_event, payload) =>
+    writeArtifact({
+      settings: getSettings(),
+      id: payload.id,
+      name: payload.name,
+      kind: payload.kind,
+      content: payload.content,
+    }),
+  );
+  ipcMain.handle("artifacts:append", async (_event, payload) =>
+    appendArtifact({
+      settings: getSettings(),
+      id: payload.id,
+      content: payload.content,
+    }),
+  );
+
+  ipcMain.handle("templates:list", async () => listProjectTemplates());
+  ipcMain.handle("templates:apply", async (_event, payload) => applyProjectTemplate({ settings: getSettings(), templateId: payload.templateId }));
+  ipcMain.handle("execution-log:list", async (_event, payload = {}) => readExecutionLog(userDataDir(), payload.limit || 200));
+  ipcMain.handle("plugins:list", async () => syncPluginMcpServers(listPlugins(userDataDir())));
+  ipcMain.handle("plugins:install-url", async (_event, payload) => syncPluginMcpServers(await installPluginFromUrl(userDataDir(), payload.url)));
+  ipcMain.handle("plugins:auth", async (_event, payload) => runPluginAuth(payload.pluginId));
+  ipcMain.handle("plugins:set-enabled", async (_event, payload) => setPluginEnabled(userDataDir(), payload.pluginId, Boolean(payload.enabled)));
+  ipcMain.handle("plugins:set-installed", async (_event, payload) => syncPluginMcpServers(await setPluginInstalled(userDataDir(), payload.pluginId, Boolean(payload.installed))));
 
   ipcMain.handle("terminal:run", async (_event, payload) =>
     runCommand({

@@ -1,0 +1,41 @@
+{
+  "id": "comfy-workflow-pack",
+  "name": "ComfyUI Workflow Pack",
+  "label": "ComfyUI Workflow Pack",
+  "version": "0.1.0",
+  "author": "Local Agent Studio",
+  "publisher": "community",
+  "status": "draft",
+  "description": "Install custom ComfyUI image and video generation workflows as selectable models.",
+  "homepage": "https://github.com/your-name/las-comfy-workflow-pack",
+  "repository": "https://github.com/your-name/las-comfy-workflow-pack",
+  "categories": ["comfyui", "image", "video", "workflow"],
+  "capabilities": ["comfy_workflow", "image_model", "agent_tool"],
+  "permissions": ["files:read", "files:write", "images:generate"],
+  "tools": [
+    {
+      "name": "comfy_workflow_pack.import",
+      "description": "Import workflow JSON files and register them as custom image models.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workflowPath": { "type": "string" },
+          "label": { "type": "string" },
+          "modelKind": { "type": "string", "default": "image" }
+        },
+        "required": ["workflowPath", "label"]
+      }
+    },
+    {
+      "name": "comfy_workflow_pack.validate",
+      "description": "Validate workflow JSON and list required model/checkpoint inputs.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workflowPath": { "type": "string" }
+        },
+        "required": ["workflowPath"]
+      }
+    }
+  ]
+}

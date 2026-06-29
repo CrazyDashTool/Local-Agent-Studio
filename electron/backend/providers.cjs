@@ -126,6 +126,11 @@ function mcpStatus(settings) {
 
 async function checkProviders(settings) {
   const ollama = measured("ollama", "Ollama", "LLM", settings.ollama.baseUrl, async () => {
+    if (settings.ollama?.apiFormat === "openai-compatible") {
+      const data = await fetchJson(endpoint(settings.ollama.baseUrl, "/v1/models"), { timeoutMs: 5000 });
+      const models = Array.isArray(data.data) ? data.data.map((model) => model.id || model.name).filter(Boolean).slice(0, 5) : [];
+      return models.length ? `OpenAI-compatible models: ${models.join(", ")}` : "OpenAI-compatible server responded, but no models were listed";
+    }
     const data = await fetchJson(endpoint(settings.ollama.baseUrl, "/api/tags"), { timeoutMs: 5000 });
     const models = Array.isArray(data.models) ? data.models.map((model) => model.name).slice(0, 5) : [];
     return models.length ? `Модели: ${models.join(", ")}` : "Сервер отвечает, моделей не найдено";

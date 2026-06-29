@@ -46,6 +46,15 @@ Local Agent Studio is built for people who want a normal chatbot interface, but 
 - **Chat export/import** as JSON.
 - **Manual update checks** through a lightweight remote `version.json` file.
 - **Agent task queue** for sending the next prompt while the current answer is running.
+- **Tool activity timeline** for visible agent/tool steps.
+- **Image gallery** with generated image history, full-screen preview, prompt details, and download controls.
+- **Artifacts** for reusable generated documents, code, JSON, Markdown, and design drafts.
+- **Personal memory** between chats, with on/off controls.
+- **Remote provider presets** for local, Runpod, and LAN-style setups.
+- **LM Studio and llama.cpp provider presets** through OpenAI-compatible endpoints.
+- **Project templates** for Work, Dev, Fun, and Research workspaces.
+- **Plugin marketplace** with official plugin cards, GitHub manifest installs, and MCP-backed extensions.
+- **Model capability badges** for text, image, audio, and MCP support.
 - **Themes**: system, light, dark.
 - **Languages**: English, Russian, Ukrainian, German, Polish.
 
@@ -60,6 +69,10 @@ Local Agent Studio is built for people who want a normal chatbot interface, but 
 ![Rendered app screen](assets/rendered-screen.png)
 
 ## What It Can Do
+
+## Official Plugins
+
+See [OFFICIAL_PLUGINS.md](OFFICIAL_PLUGINS.md) for the GitHub Git Operator setup guide.
 
 Ask it like a normal assistant:
 
@@ -104,13 +117,13 @@ Release builds are generated under `release/`.
 Windows installer:
 
 ```text
-release/Local Agent Studio-0.2.0-x64.exe
+release/Local Agent Studio-0.2.1-x64.exe
 ```
 
 Linux packages:
 
 ```text
-release/Local Agent Studio-0.2.0-x64.tar.gz
+release/Local Agent Studio-0.2.1-x64.tar.gz
 ```
 
 AppImage and `.deb` builds should be produced on Linux or CI with Linux packaging tools.
@@ -118,8 +131,8 @@ AppImage and `.deb` builds should be produced on Linux or CI with Linux packagin
 macOS packages must be produced on macOS or macOS CI:
 
 ```text
-release/Local Agent Studio-0.2.0-x64.dmg
-release/Local Agent Studio-0.2.0-arm64.dmg
+release/Local Agent Studio-0.2.1-x64.dmg
+release/Local Agent Studio-0.2.1-arm64.dmg
 ```
 
 If you are publishing this project on GitHub, attach the installer to a GitHub Release.

@@ -10,10 +10,13 @@ function defaultSettings() {
   const defaultThinking = ["off", "low", "medium", "high"].includes(envThinking) ? envThinking : "off";
 
   return {
-    version: 2,
+    version: 3,
     workspacePath: process.env.LOCAL_AGENT_WORKSPACE || homeWorkspace,
     setup: {
       firstLaunchComplete: false,
+    },
+    profile: {
+      userName: process.env.LOCAL_AGENT_USER_NAME || os.userInfo().username || "User",
     },
     context: {
       includeLocalDateTime: true,
@@ -27,6 +30,57 @@ function defaultSettings() {
       maxImageJobs: 3,
       maxToolSteps: 5,
       taskQueue: true,
+      permissionProfile: "balanced",
+    },
+    controlledExecution: {
+      dryRun: false,
+      sandboxPerTask: false,
+      evaluatorPass: false,
+      executionLog: true,
+      approvalGates: {
+        destructive: true,
+        terminal: true,
+        externalWrite: true,
+        credentialUse: true,
+        installs: true,
+      },
+    },
+    memory: {
+      enabled: false,
+      autoRemember: false,
+      maxEntries: 80,
+    },
+    remoteProviders: {
+      activePresetId: "ollama",
+      presets: [
+        {
+          id: "ollama",
+          label: "Ollama",
+          description: "Use local Ollama and local ComfyUI endpoints.",
+          kind: "full",
+          ollamaBaseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
+          comfyBaseUrl: process.env.COMFYUI_BASE_URL || "http://localhost:8188",
+          apiFormat: "ollama",
+        },
+        {
+          id: "lm-studio",
+          label: "LM Studio",
+          description: "Use the local server started from LM Studio.",
+          kind: "llm",
+          ollamaBaseUrl: process.env.LM_STUDIO_BASE_URL || "http://localhost:1234",
+          comfyBaseUrl: "",
+          apiFormat: "openai-compatible",
+        },
+        {
+          id: "llama-cpp",
+          label: "llama.cpp",
+          description: "Use a local llama.cpp server endpoint.",
+          kind: "llm",
+          ollamaBaseUrl: process.env.LLAMA_CPP_BASE_URL || "http://localhost:8080",
+          comfyBaseUrl: "",
+          apiFormat: "openai-compatible",
+        },
+      ],
     },
     permissions: {
       files: "allow",
@@ -40,6 +94,7 @@ function defaultSettings() {
       baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
       model: process.env.OLLAMA_MODEL || "auto",
       apiKey: process.env.OLLAMA_API_KEY || "",
+      apiFormat: process.env.LLM_API_FORMAT === "openai-compatible" ? "openai-compatible" : "ollama",
       thinking: defaultThinking,
       temperature: 0.35,
       contextTokens: 8192,
@@ -78,7 +133,7 @@ function defaultSettings() {
       enabled: true,
       checkOnStartup: false,
       repo: "CrazyDashTool/Local-Agent-Studio",
-      currentVersion: "0.2.0",
+      currentVersion: "0.2.1",
       versionUrl: "https://raw.githubusercontent.com/CrazyDashTool/Local-Agent-Studio/main/version.json",
     },
     comfy: {
@@ -134,6 +189,19 @@ function ensureWorkspace(settings) {
   }
 }
 
+function normalizeProviderPresets(settings) {
+  const defaults = defaultSettings();
+  settings.remoteProviders = {
+    ...defaults.remoteProviders,
+    ...(settings.remoteProviders || {}),
+    presets: defaults.remoteProviders.presets,
+  };
+  if (!settings.remoteProviders.presets.some((preset) => preset.id === settings.remoteProviders.activePresetId)) {
+    settings.remoteProviders.activePresetId = "ollama";
+  }
+  return settings;
+}
+
 function readSettings(userDataDir) {
   const filePath = settingsPath(userDataDir);
   const defaults = defaultSettings();
@@ -151,13 +219,13 @@ function readSettings(userDataDir) {
   if (parsed.ollama && !["off", "low", "medium", "high"].includes(parsed.ollama.thinking)) {
     parsed.ollama.thinking = "off";
   }
-  const merged = mergeDeep(defaults, parsed);
+  const merged = normalizeProviderPresets(mergeDeep(defaults, parsed));
   ensureWorkspace(merged);
   return merged;
 }
 
 function saveSettings(userDataDir, settings) {
-  const merged = mergeDeep(defaultSettings(), settings);
+  const merged = normalizeProviderPresets(mergeDeep(defaultSettings(), settings));
   ensureWorkspace(merged);
   fs.mkdirSync(userDataDir, { recursive: true });
   fs.writeFileSync(settingsPath(userDataDir), JSON.stringify(merged, null, 2), "utf8");

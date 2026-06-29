@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.2.1 - Memory, Artifacts, Gallery, Tool Center
+
+### New Surfaces
+
+- Added an Images tab with image history, gallery cards, full-screen preview, prompt details, and download-to-workspace actions.
+- Added an Artifacts tab for reusable documents, snippets, drafts, designs, JSON, Markdown, and code-like outputs.
+- Added a Tools tab for remote provider presets, MCP tools, project templates, plugin marketplace drafts, personal memory, and task queue controls.
+
+### Agent and Tools
+
+- Added LM Studio remote/local provider preset using OpenAI-compatible chat endpoints.
+- Added llama.cpp provider preset using OpenAI-compatible llama-server endpoints.
+- Added OpenAI-compatible `/v1/models` and `/v1/chat/completions` support alongside Ollama `/api/chat`.
+- Added artifact tool actions so the agent can create, read, and append reusable artifacts separately from chat messages and normal workspace files.
+- Added personal memory storage between chats, stored in the app data folder.
+- Added memory controls to Settings and Tools.
+- Added memory context injection into the LLM system prompt when memory is enabled.
+- Added optional auto-remember routing for stable user preferences and project facts.
+- Added image generation job history tracking for ComfyUI jobs.
+- Added remote provider presets for local machine, Runpod remote GPU, and LAN Ollama-style setups.
+- Improved MCP tool UI with grouped tool listing and manual JSON argument runner.
+- Added project templates for Work, Dev, Fun, and Research workspaces.
+- Added plugin marketplace draft storage with install/remove state for future plugin distribution.
+
+### UI
+
+- Added model capability badges for text, image, audio, and MCP support.
+- Added a compact tool activity timeline above chat messages.
+- Added smoother card, gallery, lightbox, dropdown, timeline, and panel animations.
+- Added responsive layouts for Tools, Images, Artifacts, and the gallery lightbox.
+- Added a Settings action to run the setup wizard again.
+- Reworked setup wizard into four pages: workspace, provider/model, search/API keys, and profile/memory.
+- Added Skip, Back, Next, and Launch controls to setup wizard.
+
+### Notes
+
+- Agent task queue already existed in 0.2.0 and is now surfaced more clearly in the Tools tab.
+- 0.2.1 changes are currently local until committed and pushed.
+
 ## 0.2.0 - Agent Tools, Linux Build, MCP, Runpod
 
 ### Platform and Packaging

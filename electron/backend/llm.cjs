@@ -3,8 +3,13 @@ const { endpoint, fetchJson } = require("./fetch.cjs");
 const { searchWeb } = require("./search.cjs");
 const { queueComfyPrompt } = require("./comfy.cjs");
 const { createDatabaseFromText } = require("./data.cjs");
+const { appendArtifact, readArtifact, writeArtifact } = require("./artifacts.cjs");
+const { addImageHistoryJob } = require("./imageHistory.cjs");
+const { addMemory, memoryContext } = require("./memory.cjs");
 const { callMcpTool } = require("./mcp.cjs");
+const { enabledPluginContext, pluginMcpServers } = require("./pluginMarketplace.cjs");
 const { runCommand } = require("./sandbox.cjs");
+const { appendExecutionLog } = require("./executionLog.cjs");
 const {
   appendTextFile,
   deleteWorkspacePath,
@@ -35,9 +40,14 @@ const TOOL_ACTIONS = new Set([
   "delete_path",
   "list_files",
   "run_command",
+  "search_web",
   "create_database",
   "generate_image",
   "mcp_call",
+  "remember",
+  "write_artifact",
+  "read_artifact",
+  "append_artifact",
 ]);
 
 function clamp(value, min, max) {
@@ -53,21 +63,43 @@ function lastUser(messages) {
 }
 
 function runtimeProviderSettings(settings) {
-  if (!settings.runpod?.enabled) {
-    return settings;
+  const activePreset = (settings.remoteProviders?.presets || []).find((preset) => preset.id === settings.remoteProviders?.activePresetId);
+  let next = settings;
+
+  if (activePreset) {
+    next = {
+      ...next,
+      ollama: {
+        ...next.ollama,
+        baseUrl: activePreset.ollamaBaseUrl || next.ollama.baseUrl,
+        apiFormat: activePreset.apiFormat || next.ollama.apiFormat || "ollama",
+      },
+      comfy: {
+        ...next.comfy,
+        baseUrl: activePreset.comfyBaseUrl || next.comfy.baseUrl,
+      },
+    };
+  }
+
+  if (!next.runpod?.enabled) {
+    return next;
   }
   return {
-    ...settings,
+    ...next,
     ollama: {
-      ...settings.ollama,
-      baseUrl: settings.runpod.ollamaBaseUrl || settings.ollama.baseUrl,
-      apiKey: settings.runpod.apiKey || settings.ollama.apiKey,
+      ...next.ollama,
+      baseUrl: next.runpod.ollamaBaseUrl || next.ollama.baseUrl,
+      apiKey: next.runpod.apiKey || next.ollama.apiKey,
     },
     comfy: {
-      ...settings.comfy,
-      baseUrl: settings.runpod.comfyBaseUrl || settings.comfy.baseUrl,
+      ...next.comfy,
+      baseUrl: next.runpod.comfyBaseUrl || next.comfy.baseUrl,
     },
   };
+}
+
+function isOpenAiCompatible(settings) {
+  return settings.ollama?.apiFormat === "openai-compatible";
 }
 
 function compactContent(message) {
@@ -188,6 +220,19 @@ async function resolveModel(settings, headers) {
     return settings.ollama.model;
   }
 
+  if (isOpenAiCompatible(settings)) {
+    const data = await fetchJson(endpoint(settings.ollama.baseUrl, "/v1/models"), {
+      headers,
+      timeoutMs: 8000,
+    });
+    const models = Array.isArray(data.data) ? data.data : [];
+    const firstModel = models[0]?.id || models[0]?.name;
+    if (!firstModel) {
+      throw new Error("The OpenAI-compatible provider responded, but no models are available. Load a model or set one in Settings.");
+    }
+    return firstModel;
+  }
+
   const data = await fetchJson(endpoint(settings.ollama.baseUrl, "/api/tags"), {
     headers,
     timeoutMs: 8000,
@@ -199,6 +244,47 @@ async function resolveModel(settings, headers) {
     throw new Error("Ollama responded, but no models are available. Pull a model or set one in Settings.");
   }
   return firstModel;
+}
+
+function openAiPayloadFromOllamaPayload(payload, settings) {
+  return {
+    model: payload.model,
+    messages: (payload.messages || []).map((message) => ({
+      role: message.role,
+      content: message.content || "",
+    })),
+    stream: Boolean(payload.stream),
+    temperature: payload.options?.temperature ?? Number(settings.ollama.temperature ?? 0.35),
+  };
+}
+
+async function postChat({ settings, headers, payload, timeoutMs }) {
+  if (isOpenAiCompatible(settings)) {
+    const data = await fetchJson(endpoint(settings.ollama.baseUrl, "/v1/chat/completions"), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(openAiPayloadFromOllamaPayload(payload, settings)),
+      timeoutMs,
+    });
+    const message = data?.choices?.[0]?.message || {};
+    return {
+      model: data.model || payload.model,
+      message: {
+        content: message.content || "",
+        thinking: message.reasoning_content || message.reasoning || "",
+      },
+      total_duration: undefined,
+      prompt_eval_count: data?.usage?.prompt_tokens,
+      eval_count: data?.usage?.completion_tokens,
+    };
+  }
+
+  return fetchJson(endpoint(settings.ollama.baseUrl, "/api/chat"), {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+    timeoutMs,
+  });
 }
 
 async function buildSearchQueries({ messages, settings, headers, model, maxQueries }) {
@@ -225,12 +311,7 @@ async function buildSearchQueries({ messages, settings, headers, model, maxQueri
   };
 
   try {
-    const data = await fetchJson(endpoint(settings.ollama.baseUrl, "/api/chat"), {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      timeoutMs: 30000,
-    });
+    const data = await postChat({ settings, headers, payload, timeoutMs: 30000 });
     const queries = extractJsonArray(data?.message?.content || "")
       .map((query) => String(query || "").trim())
       .filter(Boolean)
@@ -262,6 +343,19 @@ function collectSearchContext(toolResults) {
     .join("\n\n");
 }
 
+function searchToolMarkdown(result) {
+  const rows = (result.results || [])
+    .slice(0, 6)
+    .map((item, index) => {
+      const title = item.title || item.url || `Result ${index + 1}`;
+      const url = item.url ? `\nURL: ${item.url}` : "";
+      const snippet = item.content ? `\nSnippet: ${item.content}` : "";
+      return `[${index + 1}] ${title}${url}${snippet}`;
+    })
+    .join("\n\n");
+  return rows || "No usable search results returned.";
+}
+
 function buildSystemPrompt(searchContext, settings) {
   const contextBlock = searchContext
     ? `\n\nWeb search context collected from up to ${clamp(settings.agent?.maxWebSearches ?? 3, 1, 3)} searches:\n${searchContext}\n\nUse the context to synthesize a clear answer. Cite sources inline like [1] only for facts that came from the web. Do not dump raw snippets or URL lists into the main answer.`
@@ -269,13 +363,23 @@ function buildSystemPrompt(searchContext, settings) {
   const dateBlock = settings.context?.includeLocalDateTime
     ? `\nCurrent local date/time from this PC: ${new Date().toString()}. Use this for date awareness unless the user asks for current external facts that require web search.`
     : "";
+  const nameBlock = settings.profile?.userName ? `\nUser display name: ${settings.profile.userName}. Use it naturally when direct address is helpful.` : "";
+  const personalMemory = settings._userDataDir ? memoryContext(settings._userDataDir, settings) : "";
+  const memoryBlock = personalMemory
+    ? `\nPersonal memory enabled for this user:\n${personalMemory}\nUse these memories only when relevant. Do not expose the raw memory list unless the user asks.`
+    : "";
+  const pluginCapabilities = settings._userDataDir ? enabledPluginContext(settings._userDataDir) : "";
+  const pluginBlock = pluginCapabilities
+    ? `\nEnabled plugin capabilities:\n${pluginCapabilities}\nTreat plugin tools as available capabilities, but do not claim a plugin action was executed unless the app returns a tool result.`
+    : "";
 
   return `You are Local Agent Studio, a local-first desktop agent running on the user's desktop machine.
 Answer in the user's language unless the UI asks otherwise. Be concise, practical, and honest about tool state.
 Use Markdown naturally: short sections, bullets when useful, fenced code blocks for code, and bold text for emphasis.
-Available integrations are executed by the app before or during the answer: Ollama chat, ComfyUI image workflows, web search, workspace file operations, local databases, and sandbox commands.
+Available integrations are executed by the app before or during the answer: Ollama chat, ComfyUI image workflows, web search, workspace file operations, local databases, personal memory, artifacts, MCP tools, enabled plugins, and sandbox commands.
 When the user attaches an image and asks what is in it, describe or analyze the attached image. Do not switch to image generation unless the user explicitly asks to create, generate, draw, render, or make a new visual asset.
-Never claim that a search, file operation, image job, database creation, or command was executed unless a tool result is present. If a needed tool failed or is not configured, say that directly and explain what setting is missing.${dateBlock}${contextBlock}`;
+Never write pseudo tool syntax such as <tool_code>, function calls, or fake Python for actions. Tools are executed only by Local Agent Studio.
+Never claim that a search, file operation, image job, database creation, memory update, artifact update, plugin action, or command was executed unless a tool result is present. If a needed tool failed or is not configured, say that directly and explain what setting is missing.${dateBlock}${nameBlock}${memoryBlock}${pluginBlock}${contextBlock}`;
 }
 
 async function gatherSearchContext({ messages, settings, toolMode, headers, model, onEvent }) {
@@ -464,11 +568,42 @@ function normalizeToolDecision(decision, settings) {
     serverName: String(decision.serverName || "").trim(),
     toolName: String(decision.toolName || "").trim(),
     toolArguments: decision.toolArguments && typeof decision.toolArguments === "object" ? decision.toolArguments : {},
+    artifactId: String(decision.artifactId || "").trim(),
+    artifactName: String(decision.artifactName || decision.filePath || "").trim(),
+    artifactKind: String(decision.artifactKind || "text").trim(),
+    memory: String(decision.memory || "").trim(),
     reason: String(decision.reason || "").trim(),
   };
 }
 
-async function decideToolWithOllama({ messages, settings, headers, model, observations = [] }) {
+function normalizeGitHubRepoUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  if (/^https?:\/\//i.test(text)) {
+    return text;
+  }
+  if (/^github\.com\//i.test(text)) {
+    return `https://${text}`;
+  }
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(text)) {
+    return `https://github.com/${text}`;
+  }
+  return text;
+}
+
+function normalizeMcpToolArguments(decision) {
+  const args = {
+    ...(decision.toolArguments || {}),
+  };
+  if (decision.toolName === "git_clone" && !args.repoUrl) {
+    args.repoUrl = normalizeGitHubRepoUrl(args.repo || args.repository || args.url || args.cloneUrl || args.remoteUrl);
+  }
+  return args;
+}
+
+async function decideToolWithOllama({ messages, settings, headers, model, toolMode = "auto", observations = [] }) {
   const last = lastUser(messages);
   const attachmentSummary = attachmentContext(last.attachments || []);
   const recentMessages = compactMessages(messages, false)
@@ -482,6 +617,13 @@ async function decideToolWithOllama({ messages, settings, headers, model, observ
     ...(settings.image?.customModels || []).map((item) => item.id).filter(Boolean),
   ];
   const localDateContext = settings.context?.includeLocalDateTime ? new Date().toString() : "disabled";
+  const memoryRule = settings.memory?.enabled
+    ? settings.memory.autoRemember
+      ? "Memory is enabled with auto-remember. Use remember for stable user preferences, project facts, and long-term instructions that are clearly useful in future chats."
+      : "Memory is enabled. Use remember only when the user explicitly asks you to remember something."
+    : "Memory is disabled. Do not use remember.";
+  const pluginCapabilities = settings._userDataDir ? enabledPluginContext(settings._userDataDir) : "";
+  const maxWebSearches = clamp(settings.agent?.maxWebSearches ?? 3, 1, 3);
 
   const payload = {
     model,
@@ -494,10 +636,15 @@ You may be called several times for the same user request. Use the observations 
 
 Return only valid JSON with this schema:
 {
-  "action": "answer" | "write_file" | "read_file" | "append_file" | "delete_path" | "list_files" | "run_command" | "create_database" | "generate_image" | "mcp_call",
+  "action": "answer" | "write_file" | "read_file" | "append_file" | "delete_path" | "list_files" | "run_command" | "search_web" | "create_database" | "generate_image" | "mcp_call" | "remember" | "write_artifact" | "read_artifact" | "append_artifact",
   "filePath": "relative workspace path, when a file/path action is needed",
   "content": "complete file content to write or append, when needed",
+  "artifactId": "artifact id, when reading/appending an existing artifact",
+  "artifactName": "artifact display name or file name, when writing a new artifact",
+  "artifactKind": "text | code | markdown | json | design | other",
+  "memory": "short personal memory to store, when action is remember",
   "command": "terminal command, when action is run_command",
+  "query": "web search query, when action is search_web",
   "databaseName": "database name, when action is create_database",
   "databaseText": "JSON/CSV/text source for database, when action is create_database",
   "prompt": "final ComfyUI image prompt, when action is generate_image",
@@ -512,14 +659,23 @@ Return only valid JSON with this schema:
 
 Rules:
 - Act like a CLI-capable assistant. If the user asks to create, edit, append, read, list, delete, run, or generate, choose the matching tool.
+- Never answer with <tool_code>, fake function calls, or code that pretends to run tools. Choose a real action instead.
 - If the user asks to create a file "on any topic" or without exact content, you must invent useful content and include the complete file text in "content".
 - Never choose write_file with empty content unless the user explicitly asks for an empty file.
 - File paths must be relative to the workspace. If the user gives no file name, choose a sensible one, e.g. "note.txt", "README.md", "todo.md", "data.json".
 - Infer file extensions from the requested artifact. Python code must be ".py", JavaScript ".js", TypeScript ".ts", Markdown ".md", JSON ".json", CSV ".csv", HTML ".html", CSS ".css", PowerShell ".ps1".
+- Use write_artifact/read_artifact/append_artifact when the user asks to create or revise an artifact, draft, design, document, snippet, or reusable output that should live separately from normal chat.
+- ${memoryRule}
+- Use search_web when current or external information is needed, when the user asks to search/browse/look up/compare current prices/news/docs, or when tool mode is "web".
+- You can use search_web up to ${maxWebSearches} times across repeated router calls. Use a new query each time unless repeating is clearly useful.
 - Use create_database for requests to build/import/convert objects into a local database.
 - Use generate_image only for a new visual asset. If the user attaches an image and asks what is on it, choose answer.
 - Available image models: ${imageModels.join(", ")}.
-- Use mcp_call only when the user explicitly asks for a configured MCP tool/server or when the needed capability is clearly external to built-in tools.
+- Available Plugin MCP tools:
+${pluginCapabilities || "  none"}
+- Use mcp_call when the request matches an available manual MCP or Plugin MCP tool. For Plugin MCP, set serverName to the MCP server shown by the plugin and toolName to the exact tool name.
+- Repository and service actions provided by plugins must go through mcp_call. For example, if a GitHub plugin exposes git_clone and the user asks to clone a GitHub repository, choose mcp_call with that plugin tool.
+- Do not skip the router and do not assume a plugin ran unless mcp_call was selected and an observation confirms it.
 - Use run_command only when the user asks to execute a shell/CLI command or a task that clearly requires CLI execution.
 - After a tool succeeds, choose another tool only if it helps finish the user's request. Do not repeat the same failed action.
 - Choose answer when the requested work is complete or when the next step is normal conversation.
@@ -542,6 +698,9 @@ ${attachmentSummary || "none"}
 Local date/time from this PC:
 ${localDateContext}
 
+Tool mode:
+${toolMode}
+
 Tool observations so far:
 ${observations.length ? observations.join("\n\n") : "none"}`,
       },
@@ -553,12 +712,7 @@ ${observations.length ? observations.join("\n\n") : "none"}`,
     },
   };
 
-  const data = await fetchJson(endpoint(settings.ollama.baseUrl, "/api/chat"), {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-    timeoutMs: Math.min(Number(settings.ollama.timeoutMs || 120000), 45000),
-  });
+  const data = await postChat({ settings, headers, payload, timeoutMs: Math.min(Number(settings.ollama.timeoutMs || 120000), 45000) });
 
   return normalizeToolDecision(extractJsonObject(data?.message?.content || ""), settings);
 }
@@ -672,12 +826,59 @@ function terminalSummary(result) {
   }`;
 }
 
+function logExecution(settings, entry) {
+  if (settings.controlledExecution?.executionLog === false) {
+    return null;
+  }
+  return appendExecutionLog(settings._userDataDir, entry);
+}
+
+function effectivePermissions(settings) {
+  const profile = settings.agent?.permissionProfile || "balanced";
+  const base = { ...(settings.permissions || {}) };
+  const profiles = {
+    "read-only": {
+      files: "ask",
+      search: "allow",
+      images: "deny",
+      terminal: "deny",
+      database: "deny",
+      mcp: "ask",
+    },
+    balanced: base,
+    builder: {
+      ...base,
+      files: "allow",
+      search: "allow",
+      images: "allow",
+      terminal: "ask",
+      database: "allow",
+      mcp: "ask",
+    },
+    full: {
+      files: "allow",
+      search: "allow",
+      images: "allow",
+      terminal: "allow",
+      database: "allow",
+      mcp: "allow",
+    },
+  };
+  return {
+    ...base,
+    ...(profiles[profile] || {}),
+  };
+}
+
 function permissionForDecision(decision) {
   if (decision.action === "run_command") {
     return ["terminal", "Terminal run"];
   }
   if (decision.action === "generate_image") {
     return ["images", "Image generation"];
+  }
+  if (decision.action === "search_web") {
+    return ["search", "Web search"];
   }
   if (decision.action === "create_database") {
     return ["database", "Database write"];
@@ -690,7 +891,10 @@ function permissionForDecision(decision) {
     decision.action === "append_file" ||
     decision.action === "read_file" ||
     decision.action === "delete_path" ||
-    decision.action === "list_files"
+    decision.action === "list_files" ||
+    decision.action === "write_artifact" ||
+    decision.action === "read_artifact" ||
+    decision.action === "append_artifact"
   ) {
     return ["files", "Workspace file"];
   }
@@ -699,7 +903,13 @@ function permissionForDecision(decision) {
 
 function permissionDeniedResponse({ decision, settings, onEvent }) {
   const [key, label] = permissionForDecision(decision);
-  const mode = key ? settings.permissions?.[key] || "allow" : "allow";
+  if (key === "mcp" && settings._userDataDir) {
+    const pluginServer = pluginMcpServers(settings._userDataDir, settings).some((server) => server.name === decision.serverName);
+    if (pluginServer) {
+      return null;
+    }
+  }
+  const mode = key ? effectivePermissions(settings)?.[key] || "allow" : "allow";
   if (mode === "allow") {
     return null;
   }
@@ -725,14 +935,227 @@ function permissionDeniedResponse({ decision, settings, onEvent }) {
   };
 }
 
-async function executeToolDecision({ decision, settings, onEvent }) {
+function isExternalWriteTool(decision) {
+  if (decision.action !== "mcp_call") {
+    return false;
+  }
+  return /(push|post|send|publish|upload|create|update|delete|merge|comment|install|auth|login)/i.test(`${decision.serverName || ""}:${decision.toolName || ""}`);
+}
+
+function approvalReason(decision, settings) {
+  const gates = settings.controlledExecution?.approvalGates || {};
+  if (gates.destructive && decision.action === "delete_path") {
+    return "delete workspace path";
+  }
+  if (gates.terminal && decision.action === "run_command") {
+    return "run terminal command";
+  }
+  if (gates.externalWrite && isExternalWriteTool(decision)) {
+    return "write to an external service or remote";
+  }
+  if (gates.credentialUse && decision.action === "mcp_call" && /(auth|login|token|credential|github_list_repos|git_push)/i.test(decision.toolName || "")) {
+    return "use credentials";
+  }
+  if (gates.installs && decision.action === "mcp_call" && /(install|plugin|package)/i.test(decision.toolName || "")) {
+    return "install or modify a plugin/package";
+  }
+  return "";
+}
+
+function dryRunResponse({ decision, settings, taskId, onEvent }) {
+  const result = {
+    type: decision.action === "generate_image" ? "comfy" : decision.action === "mcp_call" ? "mcp" : decision.action === "run_command" ? "terminal" : "file",
+    label: `Dry run: ${decision.action}`,
+    status: "done",
+    payload: {
+      taskId,
+      workspacePath: settings.workspacePath,
+      decision,
+    },
+  };
+  logExecution(settings, {
+    event: "dry-run",
+    taskId,
+    action: decision.action,
+    workspacePath: settings.workspacePath,
+    decision,
+  });
+  onEvent?.({ type: "tool-finish", toolResult: result });
+  return {
+    content: `Dry run only. I would run **${decision.action}** with this plan:\n\n\`\`\`json\n${JSON.stringify(result.payload, null, 2)}\n\`\`\``,
+    model: "dry-run",
+    toolResults: [result],
+  };
+}
+
+function approvalRequiredResponse({ decision, settings, taskId, reason, onEvent }) {
+  const result = {
+    type: decision.action === "mcp_call" ? "mcp" : decision.action === "run_command" ? "terminal" : "file",
+    label: `Approval required: ${decision.action}`,
+    status: "error",
+    payload: {
+      taskId,
+      reason,
+      workspacePath: settings.workspacePath,
+      decision,
+      message: `Approval required before I can ${reason}. Reply with "approve" and repeat the request, or disable this approval gate in Settings.`,
+    },
+  };
+  logExecution(settings, {
+    event: "approval-required",
+    taskId,
+    action: decision.action,
+    reason,
+    workspacePath: settings.workspacePath,
+    decision,
+  });
+  onEvent?.({ type: "tool-finish", toolResult: result });
+  return {
+    content: result.payload.message,
+    model: "approval",
+    toolResults: [result],
+  };
+}
+
+async function executeToolDecision({ decision, settings, onEvent, taskId, approved = false }) {
   if (!decision || decision.action === "answer") {
     return null;
   }
 
+  if (settings.controlledExecution?.dryRun) {
+    return dryRunResponse({ decision, settings, taskId, onEvent });
+  }
+
+  const approval = !approved ? approvalReason(decision, settings) : "";
+  if (approval) {
+    return approvalRequiredResponse({ decision, settings, taskId, reason: approval, onEvent });
+  }
+
+  logExecution(settings, {
+    event: "tool-start",
+    taskId,
+    action: decision.action,
+    tool: decision.action === "mcp_call" ? `${decision.serverName}:${decision.toolName}` : decision.action,
+    workspacePath: settings.workspacePath,
+    decision,
+  });
+
   const blocked = permissionDeniedResponse({ decision, settings, onEvent });
   if (blocked) {
+    logExecution(settings, {
+      event: "tool-blocked",
+      taskId,
+      action: decision.action,
+      workspacePath: settings.workspacePath,
+      decision,
+      result: blocked.content,
+    });
     return blocked;
+  }
+
+  if (decision.action === "remember") {
+    const running = {
+      type: "memory",
+      label: "Personal memory",
+      status: "running",
+      payload: decision,
+    };
+    onEvent?.({ type: "tool-start", toolResult: running });
+    try {
+      if (!settings.memory?.enabled) {
+        throw new Error("Personal memory is disabled in Settings.");
+      }
+      if (!settings._userDataDir) {
+        throw new Error("User data directory is unavailable.");
+      }
+      const store = addMemory(settings._userDataDir, decision.memory || decision.content, "agent", settings.memory?.maxEntries);
+      const finished = {
+        ...running,
+        status: "done",
+        payload: store.entries[0],
+      };
+      onEvent?.({ type: "tool-finish", toolResult: finished });
+      return {
+        content: `Saved to personal memory: ${store.entries[0].content}`,
+        model: "memory",
+        toolResults: [finished],
+      };
+    } catch (error) {
+      const failed = {
+        ...running,
+        status: "error",
+        payload: {
+          ...decision,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+      onEvent?.({ type: "tool-finish", toolResult: failed });
+      return {
+        content: `I could not save memory: ${failed.payload.message}`,
+        model: "memory",
+        toolResults: [failed],
+      };
+    }
+  }
+
+  if (decision.action === "write_artifact" || decision.action === "read_artifact" || decision.action === "append_artifact") {
+    const labels = {
+      append_artifact: "Append artifact",
+      read_artifact: "Read artifact",
+      write_artifact: "Write artifact",
+    };
+    const running = {
+      type: "artifact",
+      label: labels[decision.action],
+      status: "running",
+      payload: decision,
+    };
+    onEvent?.({ type: "tool-start", toolResult: running });
+    try {
+      let result;
+      let content;
+      if (decision.action === "read_artifact") {
+        result = readArtifact({ settings, id: decision.artifactId || decision.artifactName || decision.filePath });
+        content = `Read artifact **${result.name}**.\n\n\`\`\`${path.extname(result.relativePath).slice(1) || "text"}\n${result.content || ""}\n\`\`\``;
+      } else if (decision.action === "append_artifact") {
+        result = appendArtifact({ settings, id: decision.artifactId || decision.artifactName || decision.filePath, content: decision.content || "" });
+        content = `Updated artifact **${result.artifact.name}** in \`Artifacts/${result.artifact.relativePath}\`.`;
+      } else {
+        result = writeArtifact({
+          settings,
+          name: decision.artifactName || decision.filePath || "artifact",
+          kind: decision.artifactKind || "text",
+          content: decision.content || "",
+        });
+        content = `Created artifact **${result.artifact.name}** in \`Artifacts/${result.artifact.relativePath}\`.`;
+      }
+      const finished = {
+        ...running,
+        status: "done",
+        payload: result,
+      };
+      onEvent?.({ type: "tool-finish", toolResult: finished });
+      return {
+        content,
+        model: "artifact",
+        toolResults: [finished],
+      };
+    } catch (error) {
+      const failed = {
+        ...running,
+        status: "error",
+        payload: {
+          ...decision,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+      onEvent?.({ type: "tool-finish", toolResult: failed });
+      return {
+        content: `I could not complete the artifact action: ${failed.payload.message}`,
+        model: "artifact",
+        toolResults: [failed],
+      };
+    }
   }
 
   if (decision.action === "write_file" || decision.action === "append_file" || decision.action === "read_file" || decision.action === "delete_path" || decision.action === "list_files") {
@@ -839,6 +1262,56 @@ async function executeToolDecision({ decision, settings, onEvent }) {
     }
   }
 
+  if (decision.action === "search_web") {
+    const query = String(decision.query || "").trim();
+    const running = {
+      type: "search",
+      label: "Web search",
+      status: "running",
+      query,
+      payload: decision,
+      results: [],
+    };
+    onEvent?.({ type: "tool-start", toolResult: running });
+    try {
+      if (!query) {
+        throw new Error("Search query is empty.");
+      }
+      const result = await searchWeb({ query, settings });
+      const finished = {
+        ...running,
+        label: `Web search (${result.provider})`,
+        status: "done",
+        results: result.results || [],
+        payload: {
+          ...decision,
+          provider: result.provider,
+        },
+      };
+      onEvent?.({ type: "tool-finish", toolResult: finished });
+      return {
+        content: `Web search for \`${query}\` returned ${finished.results.length} result${finished.results.length === 1 ? "" : "s"}.\n\n${searchToolMarkdown(finished)}`,
+        model: "search",
+        toolResults: [finished],
+      };
+    } catch (error) {
+      const failed = {
+        ...running,
+        status: "error",
+        payload: {
+          ...decision,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+      onEvent?.({ type: "tool-finish", toolResult: failed });
+      return {
+        content: `I could not search the web: ${failed.payload.message}`,
+        model: "search",
+        toolResults: [failed],
+      };
+    }
+  }
+
   if (decision.action === "create_database") {
     const running = {
       type: "database",
@@ -888,11 +1361,15 @@ async function executeToolDecision({ decision, settings, onEvent }) {
   }
 
   if (decision.action === "mcp_call") {
+    const toolArguments = normalizeMcpToolArguments(decision);
     const running = {
       type: "mcp",
       label: `MCP ${decision.serverName || "server"}:${decision.toolName || "tool"}`,
       status: "running",
-      payload: decision,
+      payload: {
+        ...decision,
+        toolArguments,
+      },
     };
     onEvent?.({ type: "tool-start", toolResult: running });
     try {
@@ -900,7 +1377,7 @@ async function executeToolDecision({ decision, settings, onEvent }) {
         settings,
         serverName: decision.serverName,
         toolName: decision.toolName,
-        args: decision.toolArguments || {},
+        args: toolArguments,
       });
       const finished = {
         ...running,
@@ -914,17 +1391,24 @@ async function executeToolDecision({ decision, settings, onEvent }) {
         toolResults: [finished],
       };
     } catch (error) {
+      const authRequired = error?.code === "PLUGIN_AUTH_REQUIRED";
       const failed = {
         ...running,
         status: "error",
         payload: {
           ...decision,
           message: error instanceof Error ? error.message : String(error),
+          authRequired,
+          pluginId: error?.pluginId,
+          pluginLabel: error?.pluginLabel,
+          authLabel: error?.authLabel,
         },
       };
       onEvent?.({ type: "tool-finish", toolResult: failed });
       return {
-        content: `I could not run the MCP tool: ${failed.payload.message}`,
+        content: authRequired
+          ? `${failed.payload.pluginLabel || "This plugin"} needs sign-in before I can use it. Click **${failed.payload.authLabel || "Sign in"}** and then try again.`
+          : `I could not run the MCP tool: ${failed.payload.message}`,
         model: "mcp",
         toolResults: [failed],
       };
@@ -949,6 +1433,20 @@ function summarizeToolResponse(response, step) {
   return [`Step ${step}${labels ? ` (${labels})` : ""}:`, body].filter(Boolean).join("\n");
 }
 
+function taskId() {
+  return `task-${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function taskScopedSettings(settings, id) {
+  if (!settings.controlledExecution?.sandboxPerTask || !settings.workspacePath) {
+    return settings;
+  }
+  return {
+    ...settings,
+    workspacePath: path.join(settings.workspacePath, ".las-tasks", id),
+  };
+}
+
 async function finalizeToolLoopAnswer({ messages, settings, headers, model, observations, toolResults, stream, onEvent }) {
   const payload = {
     model,
@@ -959,7 +1457,8 @@ async function finalizeToolLoopAnswer({ messages, settings, headers, model, obse
 
 You just used local tools for the user. Write a concise final answer.
 Do not claim a file, command, database, or image was created unless it appears in the tool observations.
-Mention saved workspace paths when relevant. For queued ComfyUI images, say they are queued and can be loaded/saved from the result card.`,
+Mention saved workspace paths when relevant. For queued ComfyUI images, say they are queued and can be loaded/saved from the result card.
+When tool observations contain web search results, synthesize a clear answer from them instead of dumping raw snippets. Include source URLs only when useful.`,
       },
       ...compactMessages(messages),
       {
@@ -995,12 +1494,7 @@ ${observations.join("\n\n")}`,
     };
   }
 
-  const data = await fetchJson(endpoint(settings.ollama.baseUrl, "/api/chat"), {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-    timeoutMs: Number(settings.ollama.timeoutMs || 120000),
-  });
+  const data = await postChat({ settings, headers, payload, timeoutMs: Number(settings.ollama.timeoutMs || 120000) });
 
   return {
     content: data?.message?.content || observations[observations.length - 1] || "",
@@ -1021,12 +1515,29 @@ async function runToolLoop({ messages, settings, headers, model, toolMode, strea
   }
 
   const maxSteps = clamp(settings.agent?.maxToolSteps || 5, 1, 8);
+  const id = taskId();
+  const approved = /\bapprove\b|одобр|подтвержд|разреш/i.test(lastUser(messages).content || "");
+  const executionSettings = taskScopedSettings(settings, id);
   const observations = [];
   const toolResults = [];
+  logExecution(settings, {
+    event: "task-start",
+    taskId: id,
+    model,
+    workspacePath: executionSettings.workspacePath,
+    settings: {
+      dryRun: Boolean(settings.controlledExecution?.dryRun),
+      sandboxPerTask: Boolean(settings.controlledExecution?.sandboxPerTask),
+      permissionProfile: settings.agent?.permissionProfile || "balanced",
+    },
+  });
+  if (executionSettings.workspacePath !== settings.workspacePath) {
+    observations.push(`Task sandbox enabled. All workspace tools for this task are bounded to: ${executionSettings.workspacePath}. Promote outputs manually after review.`);
+  }
 
   for (let step = 1; step <= maxSteps; step += 1) {
     onEvent?.({ type: "status", message: `Asking Ollama for tool step ${step}` });
-    const decision = await decideToolWithOllama({ messages, settings, headers, model, observations });
+    const decision = await decideToolWithOllama({ messages, settings, headers, model, toolMode, observations });
     if (!decision || decision.action === "answer") {
       if (!observations.length) {
         return null;
@@ -1034,7 +1545,7 @@ async function runToolLoop({ messages, settings, headers, model, toolMode, strea
       return finalizeToolLoopAnswer({ messages, settings, headers, model, observations, toolResults, stream, onEvent });
     }
 
-    const response = await executeToolDecision({ decision, settings, onEvent });
+    const response = await executeToolDecision({ decision, settings: executionSettings, onEvent, taskId: id, approved });
     if (!response) {
       if (!observations.length) {
         return null;
@@ -1044,14 +1555,16 @@ async function runToolLoop({ messages, settings, headers, model, toolMode, strea
 
     toolResults.push(...(response.toolResults || []));
     observations.push(summarizeToolResponse(response, step));
+    logExecution(settings, {
+      event: "tool-finish",
+      taskId: id,
+      action: decision.action,
+      status: (response.toolResults || []).some((tool) => tool.status === "error") ? "error" : "done",
+      workspacePath: executionSettings.workspacePath,
+      decision,
+      result: response.content,
+    });
 
-    const failed = (response.toolResults || []).some((tool) => tool.status === "error");
-    if (failed) {
-      return {
-        ...response,
-        toolResults,
-      };
-    }
   }
 
   return finalizeToolLoopAnswer({ messages, settings, headers, model, observations, toolResults, stream, onEvent });
@@ -1264,12 +1777,7 @@ ${attachmentSummary || "none"}`,
     },
   };
 
-  const data = await fetchJson(endpoint(settings.ollama.baseUrl, "/api/chat"), {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-    timeoutMs: Math.min(Number(settings.ollama.timeoutMs || 120000), 30000),
-  });
+  const data = await postChat({ settings, headers, payload, timeoutMs: Math.min(Number(settings.ollama.timeoutMs || 120000), 30000) });
 
   return extractJsonObject(data?.message?.content || "");
 }
@@ -1317,6 +1825,19 @@ async function maybeRunImageGeneration({ parsed, settings, onEvent }) {
       count: parsed.count,
       settings,
     });
+    if (settings._userDataDir) {
+      addImageHistoryJob(
+        settings._userDataDir,
+        {
+          prompt: parsed.prompt,
+          negativePrompt: settings.comfy?.negativePrompt,
+          imageModel: parsed.imageModel,
+          ideogramEffort: parsed.ideogramEffort,
+          count: parsed.count,
+        },
+        result,
+      );
+    }
     const finished = {
       ...running,
       status: "done",
@@ -1506,6 +2027,28 @@ async function readOllamaStream(response, onEvent) {
 }
 
 async function streamChat({ payload, settings, headers, onEvent }) {
+  if (isOpenAiCompatible(settings)) {
+    const nonStreamingPayload = {
+      ...payload,
+      stream: false,
+    };
+    const data = await postChat({
+      settings,
+      headers,
+      payload: nonStreamingPayload,
+      timeoutMs: Number(settings.ollama.timeoutMs || 120000),
+    });
+    const content = data?.message?.content || "";
+    const thinking = data?.message?.thinking || "";
+    if (thinking) {
+      onEvent?.({ type: "thinking", token: thinking });
+    }
+    if (content) {
+      onEvent?.({ type: "token", token: content });
+    }
+    return { content, thinking, finalData: data };
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(settings.ollama.timeoutMs || 120000));
 
@@ -1568,6 +2111,12 @@ async function runAgentMessage({ messages, settings, toolMode, stream, onEvent }
 
   onEvent?.({ type: "status", message: "Selecting Ollama model" });
   const model = await resolveModel(settings, headers);
+  logExecution(settings, {
+    event: "model-selected",
+    model,
+    toolMode,
+    workspacePath: settings.workspacePath,
+  });
 
   if (toolMode !== "none") {
     try {
@@ -1578,49 +2127,14 @@ async function runAgentMessage({ messages, settings, toolMode, stream, onEvent }
     } catch (error) {
       onEvent?.({
         type: "status",
-        message: `Tool router fallback: ${error instanceof Error ? error.message : String(error)}`,
+        message: `Tool router unavailable: ${error instanceof Error ? error.message : String(error)}`,
       });
-      const fallbackDirect = await maybeHandleDirectTool({ messages, settings, toolMode, onEvent });
-      if (fallbackDirect) {
-        return fallbackDirect;
-      }
     }
-  }
-
-  const imageTool = await maybeHandleImageIntent({ messages, settings, toolMode, headers, model, onEvent });
-  if (imageTool) {
-    return imageTool;
-  }
-
-  const { attempted, searchContext, toolResults } = await gatherSearchContext({
-    messages,
-    settings,
-    toolMode,
-    headers,
-    model,
-    onEvent,
-  });
-
-  if (attempted && !searchContext) {
-    const failed = toolResults.filter((tool) => tool.status === "error");
-    const details = failed
-      .map((tool) => {
-        const message = tool.payload?.message ? `: ${tool.payload.message}` : "";
-        return `- ${tool.label}${tool.query ? ` for \`${tool.query}\`` : ""}${message}`;
-      })
-      .join("\n");
-    return {
-      content: failed.length
-        ? `I tried to search the web, but the configured provider did not return usable results.\n\n${details}\n\nCheck Settings -> Search or switch to SerpAPI/Ollama Web Search/SearXNG.`
-        : "I ran web search, but no usable results came back. Try another provider or a more specific query.",
-      model,
-      toolResults,
-    };
   }
 
   const payload = {
     model,
-    messages: [{ role: "system", content: buildSystemPrompt(searchContext, settings) }, ...compactMessages(messages)],
+    messages: [{ role: "system", content: buildSystemPrompt("", settings) }, ...compactMessages(messages)],
     stream,
     options: {
       temperature: Number(settings.ollama.temperature ?? 0.35),
@@ -1644,16 +2158,11 @@ async function runAgentMessage({ messages, settings, toolMode, stream, onEvent }
         promptTokens: finalData.prompt_eval_count,
         completionTokens: finalData.eval_count,
       },
-      toolResults,
+      toolResults: [],
     };
   }
 
-  const data = await fetchJson(endpoint(settings.ollama.baseUrl, "/api/chat"), {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-    timeoutMs: Number(settings.ollama.timeoutMs || 120000),
-  });
+  const data = await postChat({ settings, headers, payload, timeoutMs: Number(settings.ollama.timeoutMs || 120000) });
 
   return {
     content: data?.message?.content || "",
@@ -1664,28 +2173,86 @@ async function runAgentMessage({ messages, settings, toolMode, stream, onEvent }
       promptTokens: data.prompt_eval_count,
       completionTokens: data.eval_count,
     },
-    toolResults,
+    toolResults: [],
   };
 }
 
+async function maybeRunEvaluatorPass({ messages, settings, response }) {
+  if (!settings.controlledExecution?.evaluatorPass || !response?.content) {
+    return response;
+  }
+  try {
+    const runtimeSettings = runtimeProviderSettings(settings);
+    const headers = { "Content-Type": "application/json" };
+    if (runtimeSettings.ollama.apiKey) {
+      headers.Authorization = `Bearer ${runtimeSettings.ollama.apiKey}`;
+    }
+    const model = await resolveModel(runtimeSettings, headers);
+    const payload = {
+      model,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are the evaluator pass for Local Agent Studio. Review the assistant result for correctness, safety, missing tests, and whether tool claims match tool results. Return 2-5 concise bullets. Do not rewrite the whole answer.",
+        },
+        ...compactMessages(messages, false),
+        {
+          role: "assistant",
+          content: response.content,
+        },
+      ],
+      stream: false,
+      options: {
+        temperature: 0,
+        num_ctx: Math.min(Number(runtimeSettings.ollama.contextTokens ?? 8192), 8192),
+      },
+    };
+    const data = await postChat({ settings: runtimeSettings, headers, payload, timeoutMs: Math.min(Number(runtimeSettings.ollama.timeoutMs || 120000), 45000) });
+    const review = String(data?.message?.content || "").trim();
+    if (!review) {
+      return response;
+    }
+    logExecution(settings, {
+      event: "evaluator-pass",
+      model: data.model || model,
+      result: review,
+    });
+    return {
+      ...response,
+      content: `${response.content}\n\n**Evaluator Pass**\n${review}`,
+    };
+  } catch (error) {
+    logExecution(settings, {
+      event: "evaluator-pass-error",
+      result: error instanceof Error ? error.message : String(error),
+    });
+    return response;
+  }
+}
+
 async function sendAgentMessage({ messages, settings, toolMode }) {
-  return runAgentMessage({
+  const runtimeSettings = runtimeProviderSettings(settings);
+  const response = await runAgentMessage({
     messages,
-    settings,
+    settings: runtimeSettings,
     toolMode,
     stream: false,
   });
+  return maybeRunEvaluatorPass({ messages, settings: runtimeSettings, response });
 }
 
 async function sendAgentMessageStream({ messages, settings, toolMode, onEvent }) {
   try {
-    const response = await runAgentMessage({
+    const runtimeSettings = runtimeProviderSettings(settings);
+    const initial = await runAgentMessage({
       messages,
-      settings,
+      settings: runtimeSettings,
       toolMode,
       stream: true,
       onEvent,
     });
+    const response = await maybeRunEvaluatorPass({ messages, settings: runtimeSettings, response: initial });
     onEvent?.({ type: "done", response });
     return response;
   } catch (error) {

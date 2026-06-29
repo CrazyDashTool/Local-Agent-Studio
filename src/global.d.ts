@@ -5,10 +5,15 @@ import type {
   ComfyImage,
   ComfyImageSaveResult,
   ComfyQueueResponse,
+  ArtifactItem,
   IdeogramEffort,
   ImageModel,
+  ImageHistoryItem,
+  MemoryStore,
   McpToolInfo,
+  PluginDraft,
   ProviderHealth,
+  ProjectTemplate,
   SearchProvider,
   SearchResult,
   Settings,
@@ -57,8 +62,43 @@ declare global {
       getComfyHistory: (payload: { promptId?: string }) => Promise<unknown>;
       getComfyImages: (payload: { promptId: string }) => Promise<{ promptId: string; images: ComfyImage[] }>;
       saveComfyImage: (payload: { image: ComfyImage }) => Promise<ComfyImageSaveResult>;
+      getImageHistory: () => Promise<{ items: ImageHistoryItem[] }>;
       listMcpTools: () => Promise<{ tools: McpToolInfo[] }>;
       callMcpTool: (payload: { serverName: string; toolName: string; args?: Record<string, unknown> }) => Promise<unknown>;
+      listMemory: () => Promise<MemoryStore>;
+      addMemory: (payload: { content: string; source?: string }) => Promise<MemoryStore>;
+      deleteMemory: (payload: { id: string }) => Promise<MemoryStore>;
+      clearMemory: () => Promise<MemoryStore>;
+      listArtifacts: () => Promise<{ root: string; artifacts: ArtifactItem[] }>;
+      readArtifact: (payload: { id: string }) => Promise<ArtifactItem>;
+      writeArtifact: (payload: { id?: string; name: string; kind: ArtifactItem["kind"]; content: string }) => Promise<{ root: string; artifact: ArtifactItem }>;
+      appendArtifact: (payload: { id: string; content: string }) => Promise<{ root: string; artifact: ArtifactItem }>;
+      listProjectTemplates: () => Promise<{ templates: ProjectTemplate[] }>;
+      applyProjectTemplate: (payload: { templateId: string }) => Promise<{ template: ProjectTemplate; files: WorkspaceWriteResult[] }>;
+      listExecutionLog: (payload?: { limit?: number }) => Promise<{ filePath: string; entries: import("./types").ExecutionLogEntry[] }>;
+      listPluginDrafts: () => Promise<{ plugins: PluginDraft[] }>;
+      installPluginFromUrl: (payload: { url: string }) => Promise<{ plugins: PluginDraft[] }>;
+      runPluginAuth: (payload: { pluginId: string }) => Promise<{
+        pluginId: string;
+        label: string;
+        ok: boolean;
+        result: { exitCode: number; stdout: string; stderr: string; timedOut?: boolean };
+        check?: { exitCode: number; stdout: string; stderr: string; timedOut?: boolean } | null;
+        install?: { exitCode: number; stdout: string; stderr: string; timedOut?: boolean } | null;
+        auth?: {
+          provider?: string;
+          account?: {
+            id?: number | string;
+            login?: string;
+            name?: string;
+            url?: string;
+            avatarUrl?: string;
+          } | null;
+          expiresAt?: string;
+        };
+      }>;
+      setPluginEnabled: (payload: { pluginId: string; enabled: boolean }) => Promise<{ plugins: PluginDraft[] }>;
+      setPluginInstalled: (payload: { pluginId: string; installed: boolean }) => Promise<{ plugins: PluginDraft[] }>;
       runCommand: (payload: { command: string }) => Promise<TerminalResult>;
       listFiles: (payload?: { directory?: string; depth?: number }) => Promise<WorkspaceListResult>;
       readFile: (payload: { filePath: string }) => Promise<WorkspaceReadResult>;

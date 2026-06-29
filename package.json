@@ -1,6 +1,6 @@
 {
   "name": "local-agent-studio",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Local Agent Mode desktop app powered by Ollama, ComfyUI, web search APIs, and a local sandbox.",
   "author": {
     "name": "CrazyDashTool",
@@ -17,7 +17,8 @@
     "package:linux": "npm run build && electron-builder --linux tar.gz --x64",
     "package:linux:installers": "npm run build && electron-builder --linux AppImage deb --x64",
     "package:mac": "npm run build && electron-builder --mac dmg zip --x64 --arm64",
-    "package:all": "npm run build && electron-builder -mwl"
+    "package:all": "npm run build && electron-builder -mwl",
+    "marketplace:add-plugin": "node scripts/add-plugin-to-marketplace.cjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
